@@ -17,7 +17,9 @@ final class DocumentHistory {
     }
     private var past: [Entry] = []
     private var future: [Entry] = []
-    private var revision = UUID()
+    /// Read-only outside this type: lets other layers (the AI assistant's optimistic
+    /// concurrency check) detect a change without being able to force one.
+    private(set) var revision = UUID()
     private var savedRevision: UUID?
     private var pending: Snapshot?
     private var pendingName = "Edit"
