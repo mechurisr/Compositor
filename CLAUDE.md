@@ -6,7 +6,7 @@ macOS용 Photoshop 대체 이미지 편집기 (Swift / SwiftUI / AppKit / Core G
 이 문서는 두 부분이다.
 
 1. **[1부] 코드베이스 분석** — 문서·레이어 모델, 조정/필터 적용 경로, 선택 영역·마스크 표현, 되돌리기 구조.
-2. **[2부] AI 어시스턴트 설계 계획** — JSON 명령으로 호출 가능한 `EditCommand` 계층. **계획 단계이며 아직 구현된 코드가 없다.**
+2. **[2부] AI 어시스턴트 설계 계획** — JSON 명령으로 호출 가능한 `EditCommand` 계층. **2.11의 1단계(`query.*` + 카탈로그 + 패널)는 구현됐다 — 현황은 2.13.** 2단계 이후는 여전히 계획뿐이다.
 
 ## 빌드 · 테스트
 
@@ -233,17 +233,20 @@ Compositor/Assistant/
   EditCommandCatalog.swift    # 기계가 읽는 스키마 (프롬프트/툴 정의 생성원)
   EditCommandRunner.swift     # @MainActor 실행기: 게이팅 → 검증 → 실행 → 결과
   DocumentDigest.swift        # 모델에게 보낼 읽기 전용 문서 JSON 뷰
-  AssistantSession.swift      # @Observable 대화 상태 + 턴 교대
-  AssistantClient.swift       # Anthropic Messages API 전송 (tool use)
+  PNGEncoding.swift           # 썸네일/캔버스 렌더 PNG 인코딩 헬퍼
+  CompositorTool.swift        # FoundationModels `Tool` — EditCommandRunner.runJSON 어댑터
+  AssistantSession.swift      # @Observable 대화 상태 + LanguageModelSession 래퍼
 Compositor/UI/
-  AssistantPanel.swift        # 채팅 사이드바
+  AssistantPanel.swift        # 채팅 패널 (FloatingPanelController로 표시)
 CompositorTests/
   EditCommandTests.swift
   EditCommandCatalogTests.swift
-  AssistantGatingTests.swift
+  AssistantSessionTests.swift
 ```
 
-`EditorSession`을 더 키우지 않기 위해 별도 폴더로 둔다. `EditorSession`에 필요한 변경은 **`DocumentHistory.revision`을 읽기 전용으로 노출하는 것 하나뿐**(현재 `private`)이다 — 2.7의 낙관적 동시성에 쓴다.
+`EditorSession`을 더 키우지 않기 위해 별도 폴더로 둔다. `EditorSession`에 필요한 변경은 **`DocumentHistory.revision`을 읽기 전용으로 노출하는 것 하나뿐**(현재 `private`)이다 — 2.7의 낙관적 동시성에 쓴다. **구현됨: `private(set)`.**
+
+> **아키텍처 변경 (2.13에서 상세)**: 원래 계획한 `AssistantClient.swift`(Anthropic Messages API 직접 호출)는 만들지 않았다. 대신 macOS의 `FoundationModels`(온디바이스 모델, API 키·네트워크·서버 불필요)를 기본 백엔드로 썼다. Anthropic 같은 클라우드 모델은 "업그레이드" 경로로 나중에 붙일 수 있는데, `FoundationModels`가 `LanguageModel`/`LanguageModelExecutor` 프로토콜로 커스텀 백엔드를 같은 `LanguageModelSession` API에 꽂을 수 있게 해준다 — 그러면 `CompositorTool`/`AssistantPanel`을 그대로 재사용하면서 `model:` 파라미터만 바뀔 가능성이 있다. **아직 설계·구현 안 됨.**
 
 ## 2.3 와이어 포맷
 
@@ -366,9 +369,9 @@ struct EditBatch: Codable { let label: String; let commands: [EditCommand]; var 
 
 ## 2.9 통합 지점
 
-- `ProjectTab`(`ProjectWorkspace.swift:6`)에 `session`/`controller` 옆에 `assistant: AssistantSession`을 추가 — **탭마다 독립 대화**. 기존 탭별 소유 구조와 일치한다.
-- 패널은 `ProjectWorkspaceView` / `ContentView.swift`에 사이드바로.
-- API 키는 Keychain. 네트워크 엔타이틀먼트는 **이미 켜져 있다**(`Config/Compositor.entitlements`).
+- `ProjectTab`(`ProjectWorkspace.swift:6`)에 `session`/`controller` 옆에 `assistant: AssistantSession`을 추가 — **탭마다 독립 대화**. 기존 탭별 소유 구조와 일치한다. **미구현**: 지금은 `ContentView`가 자기 `init`에서 `AssistantSession`을 직접 만든다(2.13). 탭 전환 시 대화가 유지되는지는 아직 검증 안 됐다.
+- 패널은 `ProjectWorkspaceView` / `ContentView.swift`에 사이드바로. **구현은 사이드바가 아니라 기존 `FloatingPanelController` 패턴**(Levels/Hue-Saturation/Keyboard Shortcuts와 동일) — 툴바의 sparkles 아이콘이 토글한다.
+- API 키는 Keychain. 네트워크 엔타이틀먼트는 **이미 켜져 있다**(`Config/Compositor.entitlements`). **온디바이스 기본 경로는 키·네트워크가 전혀 필요 없다** — 이 항목은 Anthropic 업그레이드 경로에만 해당.
 
 ## 2.10 테스트 계획
 
@@ -380,12 +383,12 @@ struct EditBatch: Codable { let label: String; let commands: [EditCommand]; var 
 
 ## 2.11 단계별 진행
 
-| 단계 | 범위 |
-|---|---|
-| 1 | `query.*` 전용(변경 없음) + 카탈로그 + 패널. digest와 프롬프트의 타당성을 먼저 증명한다. |
-| 2 | `layer.*`, `selection.*`, `mask.*`, `adjustment.*` + 원자적 배치 + 승인 UI. |
-| 3 | `filter.*`(비동기 모달 구동), `effects.*`, `transform.*`. |
-| 4 | `pixels.*`, 브러시, 내보내기. |
+| 단계 | 범위 | 상태 |
+|---|---|---|
+| 1 | `query.*` 전용(변경 없음) + 카탈로그 + 패널. digest와 프롬프트의 타당성을 먼저 증명한다. | **구현됨 — 2.13** |
+| 2 | `layer.*`, `selection.*`, `mask.*`, `adjustment.*` + 원자적 배치 + 승인 UI. | 계획만 |
+| 3 | `filter.*`(비동기 모달 구동), `effects.*`, `transform.*`. | 계획만 |
+| 4 | `pixels.*`, 브러시, 내보내기. | 계획만 |
 
 ## 2.12 위험과 미결정 사항
 
@@ -394,3 +397,49 @@ struct EditBatch: Codable { let label: String; let commands: [EditCommand]; var 
 - **토큰 비용**: digest 크기, 썸네일, 캔버스 렌더. 매 턴 전체 캔버스를 보내지 않는다.
 - **오프라인 앱에 네트워크가 들어온다**는 점 자체를 사용자에게 명시해야 한다(API 키·전송 내용).
 - 파괴적 필터는 레이어 픽셀을 교체한다 — `DocumentHistory`의 256 MiB 보존 한계(`DocumentHistory.swift:28`)에 AI의 연속 작업이 빨리 닿을 수 있다. 배치를 원자적으로 묶는 것이 여기서도 도움이 된다.
+
+## 2.13 구현 현황 — Stage 1 (2026-09-24, `ai-assistant` 브랜치)
+
+Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실행까지 확인됐다. 아래는 계획(2.1–2.12) 대비 실제로 달라진 점과 남은 일이다.
+
+### 구현된 파일
+
+| 파일 | 내용 |
+|---|---|
+| `Assistant/EditCommand.swift` | `EditCommand` enum(현재 `query.*` 5종만), `LayerRef`, `EditCommandError`(`code`/`message`/`hint`). JSON 와이어 포맷은 2.3 그대로. |
+| `Assistant/EditCommandCatalog.swift` | `CommandDescriptor` 배열. `EditCommandCatalogTests`가 카탈로그↔디코더 드리프트를 잡는다. |
+| `Assistant/DocumentDigest.swift` | `DocumentDigest`/`LayerDigest`/`HistoryDigest`/`SelectionDigest`/`CanvasRenderDigest`. `ProjectManifest`를 그대로 재사용(2.6 계획대로). |
+| `Assistant/PNGEncoding.swift` | 캔버스 렌더 다운스케일 + PNG/base64 인코딩 (계획엔 없던 파일 — `ImageExporter`의 렌더 자체는 재사용하고, 리사이즈·인코딩만 새로 얇게 얹었다). |
+| `Assistant/EditCommandRunner.swift` | `@MainActor final class EditCommandRunner: @unchecked Sendable`. `run(_:)`은 타입 있는 `EditCommand`를 받고, **`runJSON(command:argumentsJSON:)`이 실제 진입점**(아래 참고). |
+| `Assistant/CompositorTool.swift` | `FoundationModels.Tool` 하나. `command`(String) + `argumentsJSON`(String)만 받아 `runJSON`으로 넘긴다. |
+| `Assistant/AssistantSession.swift` | `@MainActor @Observable`. `SystemLanguageModel.default.availability` 체크 → `LanguageModelSession(tools:instructions:)`. `messages`/`submit(_:)`로 채팅 상태, `showPanel()`/`closePanel()`/`togglePanel()`로 자기 `FloatingPanelController` 소유. |
+| `UI/AssistantPanel.swift` | 최소 채팅 SwiftUI 뷰. 가용성 배너 + "다시 확인" 버튼 + 메시지 목록 + 입력창. |
+| `Document/DocumentHistory.swift` | `revision`을 `private var` → `private(set) var`로. |
+| `ContentView.swift` | `@State private var assistant: AssistantSession`을 커스텀 `init`에서 `session`으로 생성. 툴바 `.primaryAction`에 sparkles 아이콘 버튼 → `assistant.togglePanel()`. |
+| `CompositorTests/EditCommandTests.swift`, `EditCommandCatalogTests.swift`, `AssistantSessionTests.swift` | 아래 참고. |
+
+### 계획과 달라진 점
+
+1. **`AssistantClient.swift`(Anthropic HTTP 클라이언트)를 만들지 않았다.** 대신 macOS `FoundationModels`(온디바이스 모델)를 기본 백엔드로 썼다 — **API 키·네트워크·서버 비용 전혀 없이 "무료 기본값"을 만들 수 있어서.** `SystemLanguageModel.default.availability`가 `.available`/`.unavailable(reason)`을 주고, 안 되면 이유를 그대로 패널에 보여준다(기기 미지원/Apple Intelligence 꺼짐/모델 준비 중).
+2. **명령마다 `Tool`을 만들지 않고 `Tool` 하나(`CompositorTool`)로 접었다.** Apple 문서가 "요청당 툴 3–5개"를 권장하는데 Stage 1만 해도 5개 명령이라 명령마다 툴을 만드는 건 이 한도를 바로 넘는다. `CompositorTool.Arguments`는 `{command, argumentsJSON}` 뿐이고, 실제 스키마 검증은 여전히 `EditCommand`의 `Decodable`이 한다 — 2.1의 "새 변경 경로를 만들지 않는다" 원칙과 같은 이유로, 이 얇은 어댑터도 두 번 만들지 않았다.
+3. **`EditCommandRunner`에 `runJSON(command:argumentsJSON:)`이 추가됐다** — 문자열 in/out, `FoundationModels`를 import하지 않는다. 모델의 tool call이 실제로 거치는 경로이면서, 모델 없이도(`EditCommandTests`) 테스트할 수 있는 이유다.
+4. **패널은 사이드바가 아니라 `FloatingPanelController`**(기존 Levels/Hue-Saturation/Keyboard Shortcuts와 같은 패턴)로 구현했다. `ProjectTab`에 `assistant`를 얹는 2.9 계획은 아직 안 했고, 지금은 `ContentView`가 직접 소유한다 — 탭을 넘나들 때 대화가 유지되는지는 검증 전이다.
+5. **결과 컨트랙트가 2.5와 조금 다르다.** 쓰기 명령이 아직 없어서 `undoName`/`digestDelta`는 없고, `runJSON`은 `{ok, output}` 또는 `{ok:false, errorCode, errorMessage, errorHint}`만 돌려준다. 쓰기 패밀리가 들어올 때 `undoName`/`resolvedIDs`/`warnings`를 추가해야 한다.
+
+### 테스트
+
+`EditCommandTests`(11개) + `EditCommandCatalogTests`(3개) + `AssistantSessionTests`(2개) — 전부 통과. `AssistantSessionTests`는 `SystemLanguageModel.default.availability`를 먼저 확인하고, `.available`이 아니면 해당 분기를 건너뛴다(Apple 공식 가이드가 권장하는 fallback 패턴과 동일) — CI나 Apple Intelligence가 꺼진 머신에서도 플레이키하지 않다.
+
+### 실기기 확인 상태 (2026-09-24)
+
+- M4 MacBook Air, macOS 27에서 sparkles 버튼 → 패널 → 텍스트 입력까지 **크래시 없이 동작 확인**.
+- `SystemLanguageModel.default.availability`가 이 머신에서 `.unavailable(.modelNotReady)`로 나옴 — 모델이 아직 다운로드/준비되지 않은 상태. Apple Intelligence 자체는 인식되고 있어서 기기/언어 문제로는 안 보인다.
+- macOS 27의 새 대화형 "Siri AI"는 한국어가 2026년 10월에야 추가될 예정이지만, 이건 별개 기능이고 우리가 쓰는 기본 `SystemLanguageModel`과는 무관해 보인다.
+- **재부팅 후 재확인 예정.**
+
+### Stage 1 남은 일
+
+- 실기기에서 모델이 준비된 뒤 실제 응답 확인 (query.describeDocument 등을 모델이 정확히 호출하는지).
+- `ProjectTab`에 `assistant` 이전 — 탭별 대화 분리 (2.9).
+- Anthropic(또는 다른 클라우드 모델) 업그레이드 경로 설계 — `LanguageModel`/`LanguageModelExecutor` 커스텀 백엔드로 `AssistantSession`/`CompositorTool`을 그대로 재사용할 수 있는지 검증.
+- API 키 저장 방식(Keychain) — 업그레이드 경로를 실제로 만들 때.

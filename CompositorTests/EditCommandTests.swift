@@ -131,4 +131,35 @@ struct EditCommandTests {
             #expect(error == .unknownCommand("layer.setOpacity"))
         }
     }
+
+    /// `runJSON` is what `CompositorTool.call(arguments:)` actually goes through, so this is
+    /// the path a model's tool call exercises — checked here without needing a live model.
+    @Test func runJSONSucceedsAndFailsAsStructuredEnvelopes() async throws {
+        let session = EditorSession()
+        let runner = EditCommandRunner(session: session)
+
+        let capabilities = await runner.runJSON(command: "query.getCapabilities", argumentsJSON: "{}")
+        #expect(try JSONDecoder().decode(ToolEnvelopeProbe.self, from: Data(capabilities.utf8)).ok == true)
+
+        let unknown = await runner.runJSON(command: "layer.setOpacity", argumentsJSON: "{}")
+        let unknownProbe = try JSONDecoder().decode(ToolEnvelopeProbe.self, from: Data(unknown.utf8))
+        #expect(unknownProbe.ok == false)
+        #expect(unknownProbe.errorCode == "unknown_command")
+
+        let malformed = await runner.runJSON(command: "query.describeLayer", argumentsJSON: "not json")
+        let malformedProbe = try JSONDecoder().decode(ToolEnvelopeProbe.self, from: Data(malformed.utf8))
+        #expect(malformedProbe.ok == false)
+        #expect(malformedProbe.errorCode == "invalid_arguments")
+
+        // An empty string arguments blob (a model that skips the object) falls back to "{}".
+        let noDocument = await runner.runJSON(command: "query.renderCanvas", argumentsJSON: "")
+        let noDocumentProbe = try JSONDecoder().decode(ToolEnvelopeProbe.self, from: Data(noDocument.utf8))
+        #expect(noDocumentProbe.ok == false)
+        #expect(noDocumentProbe.errorCode == "no_document")
+    }
+}
+
+private struct ToolEnvelopeProbe: Decodable {
+    var ok: Bool
+    var errorCode: String?
 }
