@@ -234,7 +234,8 @@ Compositor/Assistant/
   EditCommandRunner.swift     # @MainActor 실행기: 게이팅 → 검증 → 실행 → 결과
   DocumentDigest.swift        # 모델에게 보낼 읽기 전용 문서 JSON 뷰
   PNGEncoding.swift           # 썸네일/캔버스 렌더 PNG 인코딩 헬퍼
-  CompositorTool.swift        # FoundationModels `Tool` — EditCommandRunner.runJSON 어댑터
+  CompositorTool.swift        # FoundationModels `Tool` 두 개(InspectDocumentTool·EditLayerTool) + CompositorToolBackend
+  EditCommandRunner+Edits.swift # 2단계: propose / applyBatch / layerEditBlocker
   AssistantSession.swift      # @Observable 대화 상태 + LanguageModelSession 래퍼
 Compositor/UI/
   AssistantPanel.swift        # 채팅 패널 (FloatingPanelController로 표시)
@@ -246,7 +247,7 @@ CompositorTests/
 
 `EditorSession`을 더 키우지 않기 위해 별도 폴더로 둔다. `EditorSession`에 필요한 변경은 **`DocumentHistory.revision`을 읽기 전용으로 노출하는 것 하나뿐**(현재 `private`)이다 — 2.7의 낙관적 동시성에 쓴다. **구현됨: `private(set)`.**
 
-> **아키텍처 변경 (2.13에서 상세)**: 원래 계획한 `AssistantClient.swift`(Anthropic Messages API 직접 호출)는 만들지 않았다. 대신 macOS의 `FoundationModels`(온디바이스 모델, API 키·네트워크·서버 불필요)를 기본 백엔드로 썼다. Anthropic 같은 클라우드 모델은 "업그레이드" 경로로 나중에 붙일 수 있는데, `FoundationModels`가 `LanguageModel`/`LanguageModelExecutor` 프로토콜로 커스텀 백엔드를 같은 `LanguageModelSession` API에 꽂을 수 있게 해준다 — 그러면 `CompositorTool`/`AssistantPanel`을 그대로 재사용하면서 `model:` 파라미터만 바뀔 가능성이 있다. **아직 설계·구현 안 됨.**
+> **아키텍처 변경 (2.13에서 상세)**: 원래 계획한 `AssistantClient.swift`(Anthropic Messages API 직접 호출)는 만들지 않았다. 대신 macOS의 `FoundationModels`(온디바이스 모델, API 키·네트워크·서버 불필요)를 기본 백엔드로 썼다. Anthropic 같은 클라우드 모델은 "업그레이드" 경로로 나중에 붙일 수 있는데, `FoundationModels`가 `LanguageModel`/`LanguageModelExecutor` 프로토콜로 커스텀 백엔드를 같은 `LanguageModelSession` API에 꽂을 수 있게 해준다 — 그러면 도구들(`CompositorTool.swift`)/`AssistantPanel`을 그대로 재사용하면서 `model:` 파라미터만 바뀔 가능성이 있다. **아직 설계·구현 안 됨.**
 
 ## 2.3 와이어 포맷
 
@@ -386,7 +387,7 @@ struct EditBatch: Codable { let label: String; let commands: [EditCommand]; var 
 | 단계 | 범위 | 상태 |
 |---|---|---|
 | 1 | `query.*` 전용(변경 없음) + 카탈로그 + 패널. digest와 프롬프트의 타당성을 먼저 증명한다. | **구현됨 — 2.13** |
-| 2 | `layer.*`, `selection.*`, `mask.*`, `adjustment.*` + 원자적 배치 + 승인 UI. | 계획만 |
+| 2 | `layer.*`, `selection.*`, `mask.*`, `adjustment.*` + 원자적 배치 + 승인 UI. | **2a 구현됨**(`layer.*` + 배치 + 승인 UI) — 2.14. `selection.*`/`mask.*`/`adjustment.*`는 계획만 |
 | 3 | `filter.*`(비동기 모달 구동), `effects.*`, `transform.*`. | 계획만 |
 | 4 | `pixels.*`, 브러시, 내보내기. | 계획만 |
 
@@ -411,7 +412,7 @@ Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실기기�
 | `Assistant/DocumentDigest.swift` | `DocumentDigest`/`LayerDigest`/`HistoryDigest`/`SelectionDigest`/`CanvasRenderDigest`. `ProjectManifest`를 그대로 재사용(2.6 계획대로). |
 | `Assistant/PNGEncoding.swift` | 캔버스 렌더 다운스케일 + PNG/base64 인코딩 (계획엔 없던 파일 — `ImageExporter`의 렌더 자체는 재사용하고, 리사이즈·인코딩만 새로 얇게 얹었다). |
 | `Assistant/EditCommandRunner.swift` | `@MainActor final class EditCommandRunner: @unchecked Sendable`. `run(_:)`은 타입 있는 `EditCommand`를 받고, **`runJSON(command:argumentsJSON:)`이 실제 진입점**(아래 참고). |
-| `Assistant/CompositorTool.swift` | `FoundationModels.Tool` 하나. `command`(String) + `argumentsJSON`(String)만 받아 `runJSON`으로 넘긴다. 예외는 `query.renderCanvas` 하나 — 렌더한 `CGImage`를 `CanvasImageMailbox`에 맡기고 텍스트만 돌려준다(아래 "온디바이스 모델의 함정" 1). |
+| `Assistant/CompositorTool.swift` | (Stage 1 당시) `FoundationModels.Tool` 하나. `command`(String) + `argumentsJSON`(String)만 받아 `runJSON`으로 넘긴다. **2단계에서 타입 있는 도구 두 개로 바뀌었다 — 2.14.** 예외는 `query.renderCanvas` 하나 — 렌더한 `CGImage`를 `CanvasImageMailbox`에 맡기고 텍스트만 돌려준다(아래 "온디바이스 모델의 함정" 1). |
 | `Assistant/AssistantSession.swift` | `@MainActor @Observable`. `SystemLanguageModel.default.availability` 체크 → `LanguageModelSession(tools:instructions:)`. `messages`/`submit(_:)`로 채팅 상태, `showPanel()`/`closePanel()`/`togglePanel()`로 자기 `FloatingPanelController` 소유. 한 턴에 모델을 최대 3번 부른다: 도구 대화 → (메일박스에 캔버스가 있으면) 이미지를 직접 첨부해 재질문 → (답이 사용자 언어가 아니면) 도구 없는 세션으로 번역. |
 | `UI/AssistantPanel.swift` | 최소 채팅 SwiftUI 뷰. 가용성 배너 + "다시 확인" 버튼 + 메시지 목록 + 입력창. |
 | `Document/DocumentHistory.swift` | `revision`을 `private var` → `private(set) var`로. |
@@ -421,11 +422,11 @@ Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실기기�
 ### 계획과 달라진 점
 
 1. **`AssistantClient.swift`(Anthropic HTTP 클라이언트)를 만들지 않았다.** 대신 macOS `FoundationModels`(온디바이스 모델)를 기본 백엔드로 썼다 — **API 키·네트워크·서버 비용 전혀 없이 "무료 기본값"을 만들 수 있어서.** `SystemLanguageModel.default.availability`가 `.available`/`.unavailable(reason)`을 주고, 안 되면 이유를 그대로 패널에 보여준다(기기 미지원/Apple Intelligence 꺼짐/모델 준비 중).
-2. **명령마다 `Tool`을 만들지 않고 `Tool` 하나(`CompositorTool`)로 접었다.** Apple 문서가 "요청당 툴 3–5개"를 권장하는데 Stage 1만 해도 5개 명령이라 명령마다 툴을 만드는 건 이 한도를 바로 넘는다. `CompositorTool.Arguments`는 `{command, argumentsJSON}` 뿐이고, 실제 스키마 검증은 여전히 `EditCommand`의 `Decodable`이 한다 — 2.1의 "새 변경 경로를 만들지 않는다" 원칙과 같은 이유로, 이 얇은 어댑터도 두 번 만들지 않았다.
+2. **명령마다 `Tool`을 만들지 않고 `Tool` 하나(`CompositorTool`)로 접었다.** (2.14에서 `{command, argumentsJSON}` 문자열 방식은 폐기 — 온디바이스 모델이 문자열 속 JSON을 만들지 못했다.) Apple 문서가 "요청당 툴 3–5개"를 권장하는데 Stage 1만 해도 5개 명령이라 명령마다 툴을 만드는 건 이 한도를 바로 넘는다. `CompositorTool.Arguments`는 `{command, argumentsJSON}` 뿐이고, 실제 스키마 검증은 여전히 `EditCommand`의 `Decodable`이 한다 — 2.1의 "새 변경 경로를 만들지 않는다" 원칙과 같은 이유로, 이 얇은 어댑터도 두 번 만들지 않았다.
 3. **`EditCommandRunner`에 `runJSON(command:argumentsJSON:)`이 추가됐다** — 문자열 in/out, `FoundationModels`를 import하지 않는다. 모델의 tool call이 실제로 거치는 경로이면서, 모델 없이도(`EditCommandTests`) 테스트할 수 있는 이유다.
 4. **패널은 사이드바가 아니라 `FloatingPanelController`**(기존 Levels/Hue-Saturation/Keyboard Shortcuts와 같은 패턴)로 구현했다. 소유는 2.9 계획대로 `ProjectTab.assistant`(2026-10-10).
 5. **결과 컨트랙트가 2.5와 조금 다르다.** 쓰기 명령이 아직 없어서 `undoName`/`digestDelta`는 없고, `runJSON`은 `{ok, output}` 또는 `{ok:false, errorCode, errorMessage, errorHint}`만 돌려준다. 쓰기 패밀리가 들어올 때 `undoName`/`resolvedIDs`/`warnings`를 추가해야 한다.
-6. **디코드는 `EditCommandRunner.decode(command:argumentsJSON:)` 한 곳**이고, 실패 봉투는 `EditCommandRunner.failureJSON(_:)`이 만든다. 특정 명령을 특별 취급하는 호출자(`CompositorTool`의 renderCanvas)도 이 둘을 거쳐야 한다 — 직접 JSON을 디코드하거나 문자열 보간으로 에러 JSON을 만들지 말 것.
+6. **디코드는 `EditCommandRunner.decode(command:argumentsJSON:)` 한 곳**이고, 실패 봉투는 `EditCommandRunner.failureJSON(_:)`이 만든다. 특정 명령을 특별 취급하는 호출자(`CompositorToolBackend`의 renderCanvas·편집 제안)도 이 둘을 거쳐야 한다 — 직접 JSON을 디코드하거나 문자열 보간으로 에러 JSON을 만들지 말 것.
 
 ### 온디바이스 모델의 함정 (2026-10-10 실측 — 2단계 이후 지시문·도구를 바꿀 때 반드시 재확인)
 
@@ -449,5 +450,39 @@ Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실기기�
 
 - ~~`ProjectTab`에 `assistant` 이전 — 탭별 대화 분리 (2.9)~~ → 완료. 테스트: `ProjectWorkspaceTests.eachTabKeepsItsOwnAssistant`, `assistantPanelFollowsTheCurrentTab`.
 - 패널이 마크다운을 렌더하지 않는다(`**`가 그대로 보임).
-- Anthropic(또는 다른 클라우드 모델) 업그레이드 경로 설계 — `LanguageModel`/`LanguageModelExecutor` 커스텀 백엔드로 `AssistantSession`/`CompositorTool`을 그대로 재사용할 수 있는지 검증.
+- Anthropic(또는 다른 클라우드 모델) 업그레이드 경로 설계 — `LanguageModel`/`LanguageModelExecutor` 커스텀 백엔드로 `AssistantSession`과 도구들을 그대로 재사용할 수 있는지 검증.
 - API 키 저장 방식(Keychain) — 업그레이드 경로를 실제로 만들 때.
+
+## 2.14 구현 현황 — Stage 2a: `layer.*` + 제안/승인 (2026-10-10)
+
+### 무엇이 있나
+
+- **명령**: `layer.add`(이름 선택), `layer.rename`, `layer.setVisibility`, `layer.setOpacity`(0–1, 범위 밖은 거부 — 클램프 안 함), `layer.setBlendMode`(대소문자 무시, 폴더는 거부), `layer.delete`(라이브 마스크 소스는 거부 — `deleteLayer`가 Bake/Remove Links 모달을 띄우기 때문).
+- **제안 모드(2.8)**: 모델의 편집 호출은 실행되지 않는다. `EditCommandRunner.propose`가 검증하고 승인 카드용 한국어 요약을 만든 뒤 `ProposalCollector`에 쌓는다. `.active`/`.index` 참조는 제안 시점의 id로 **고정(pin)** — 승인한 것이 그대로 실행된다. 같은 제안 안에서 `add`/`rename`이 만들 이름은 `pendingNames`로 미리 참조 가능. 같은 레이어의 같은 setter는 나중 것이 앞의 것을 대체(`supersedingKey`).
+- **적용**: `applyBatch`가 바깥 `beginEdit("AI: …")`로 감싸 **undo 한 단계**. 실패하면 중단하고 `session.undo()`로 되돌린다(부분 단계가 redo 스택에 남는 건 감수). 세션 메서드는 가드에 걸리면 조용히 반환하므로 실행 후 문서를 확인해 `not_applied`로 보고.
+- **게이팅**: `EditorSession.layerEditBlocker` — `canEditLayers` 조건을 하나씩 이름 붙여 미러링(둘을 함께 유지할 것) + `opacityEditLayerID`(불투명도 드래그 중이면 `setLayerOpacity`가 활성 레이어가 아니라 드래그 중인 레이어에 쓴다). `busy`면 제안을 남겨 두고 나중에 다시 적용 가능.
+- **낙관적 동시성**: 제안 시점 `history.revision`을 기록, 적용 시 다르면 적용 안 함. 결과(적용/취소/실패/거부)는 다음 메시지 앞에 영어 메모로 모델에게 전달(`proposalOutcomeNote`).
+- **UI**: `AssistantPanel`의 `ProposalCard` — 요약 목록, 삭제는 빨간색, 경고는 주황색, 적용/취소.
+- **우회 차단**: `run`/`runJSON`에 편집 명령이 오면 `not_supported` — 승인 없이 실행되는 경로는 없다.
+
+### 도구 설계 — 실측으로 바뀐 것 (온디바이스 모델, 한국어 요청, 각 2–3회)
+
+1. **`{command, argumentsJSON}` 문자열 도구 폐기 → 타입 있는 `@Generable` 도구 두 개**: `InspectDocumentTool`(`query` enum: describeDocument/renderCanvas/getHistory), `EditLayerTool`(`action` enum + `layer` + `value`). 문자열 방식에서 모델은 `argumentsJSON`을 `"{"`에서 잘라 보내거나 `query.layer.setOpacity` 같은 이름을 지어냈다 — 정답 제안 **3/10**. 타입 도구로 **6/10 → 12/15**. 타입 인자는 와이어 포맷으로 되돌려 `CompositorToolBackend.handle` → `EditCommandRunner.decode` 한 경로를 그대로 탄다.
+2. **값은 `value` 문자열 하나**: 동작별 옵셔널 필드(`name`/`opacity`/`blendMode`, blendMode를 enum으로 해도)를 주면 모델은 `blendMode`를 **한 번도 채우지 않고** 이름 칸에 "Layer 1 - Multiply"를 썼다(블렌드 0/6). `value` 하나로 바꾸자 3/3. 불투명도는 도구에서 퍼센트("50", "50%"; 1 이하 소수는 비율)로 받는다(`EditLayerTool.opacity(from:)`).
+3. **`show`/`hide`를 별도 action으로**: 범용 이름일 때 "숨겨줘"에 `layer.delete`를 제안한 적이 있다. 분리 후 6/6.
+4. **모델용 `describeLayer` 제거**: 레이어 이름 없이 불러 "not found"를 받고 "레이어가 없다"고 결론 내렸다. `describeDocument`가 모든 레이어를 담는다.
+5. **모델은 도구 에러를 받으면 재시도하지 않는다** — 거의 항상 포기하고 답한다. 에러 문구를 잘 쓰는 것보다 처음부터 맞게 부르게 하는 게 중요. `LayerRef`가 문자열(이름/UUID)·정수(인덱스) 축약형도 받는 이유.
+6. **조사 붙은 한국어 이름은 번역·변형된다**: "배경으로" → "Background"/"背景", "하늘로" → "hallo"/"hail"/"himmel"(0/6). 따옴표로 감싼 '인물'은 3/3 정확. 지시문("번역하지 말 것")으로 안 고쳐짐. → 이름이 사용자 메시지에 없으면 승인 카드에 경고("따옴표로 감싸서 다시 요청")를 단다(`ProposalCollector.unrequestedName`, 6/6 탐지). 모델에게도 알리지만 재호출은 0/6.
+
+측정 결과 요약: 불투명도 3/3, 숨기기 3/3, 블렌드 3/3, 추가 3/3, 이름 변경(따옴표) 3/3·(조사) 0/6 — 단 오답은 전부 카드에서 경고.
+
+### 테스트
+
+`EditCommandEditTests`(15개, 모델 불필요): 검증·고정, 폴더 블렌드 거부, 배치 = undo 1단계 + 완전 복원, 이름으로 연쇄 참조, 실패 시 롤백, 게이팅(불투명도 드래그·busy), 라이브 마스크 소스 삭제 거부, `runJSON` 우회 차단, 도구가 실행 대신 제안, 대체(supersede), 이름 경고, 퍼센트 해석, `LayerRef` 축약형. `AssistantSessionTests`에 실모델 2개 추가(제안 → 승인 → undo 1단계, 사람이 편집하면 적용 거부). 전체 스위트 496개 중 495개 통과 — 실패 1개는 `SliderSnapTests`(SwiftUI `Slider` 안에서 `NSSlider`를 못 찾음, 어시스턴트와 무관).
+
+### 2단계 남은 일
+
+- `selection.*`, `mask.*`, `adjustment.*` 패밀리.
+- 승인 카드에서 경고 달린 이름을 바로 고칠 수 있게(인라인 편집) — 조사 붙은 한국어 이름 문제의 실질적 해결책.
+- 도구 enum이 커질수록 정확도가 변할 수 있으니 패밀리를 추가할 때마다 위 측정을 다시 할 것.
+

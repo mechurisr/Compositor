@@ -1,9 +1,9 @@
 import SwiftUI
 
 /// A minimal chat window for `AssistantSession`, shown in a `FloatingPanelController` the same
-/// way Levels, Hue/Saturation, and the Keyboard Shortcuts sheet are. Stage 1's assistant can
-/// only read the document, so there's nothing here to approve or undo yet — CLAUDE.md 2.8's
-/// approval flow arrives once a mutating command family does.
+/// way Levels, Hue/Saturation, and the Keyboard Shortcuts sheet are. Edits the model proposes
+/// appear as a card below the conversation and run only when the person presses 적용
+/// (CLAUDE.md 2.8).
 struct AssistantPanel: View {
     @Bindable var assistant: AssistantSession
     @State private var draft = ""
@@ -17,6 +17,12 @@ struct AssistantPanel: View {
                     LazyVStack(alignment: .leading, spacing: 8) {
                         ForEach(assistant.messages) { message in
                             AssistantMessageRow(message: message)
+                        }
+                        if let proposal = assistant.proposal, !assistant.isResponding {
+                            ProposalCard(proposal: proposal,
+                                         apply: { Task { await assistant.applyProposal() } },
+                                         discard: { assistant.discardProposal() })
+                                .id(proposal.id)
                         }
                         if assistant.isResponding {
                             HStack(spacing: 6) {
@@ -32,6 +38,7 @@ struct AssistantPanel: View {
                 }
                 .onChange(of: assistant.isResponding) { _, responding in
                     if responding { proxy.scrollTo("responding", anchor: .bottom) }
+                    else if let id = assistant.proposal?.id { proxy.scrollTo(id, anchor: .bottom) }
                 }
             }
             .frame(height: 320)
@@ -65,6 +72,37 @@ struct AssistantPanel: View {
         let text = draft
         draft = ""
         Task { await assistant.submit(text) }
+    }
+}
+
+/// The edits the model proposed, each as one line, with 적용 / 취소. Deletions are marked.
+private struct ProposalCard: View {
+    let proposal: AssistantProposal
+    let apply: () -> Void
+    let discard: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("제안된 편집 \(proposal.edits.count)건").font(.caption).foregroundStyle(.secondary)
+            ForEach(proposal.edits) { edit in
+                VStack(alignment: .leading, spacing: 2) {
+                    Label(edit.summary, systemImage: edit.isDestructive ? "trash" : "pencil")
+                        .foregroundStyle(edit.isDestructive ? Color.red : Color.primary)
+                    if let warning = edit.warning {
+                        Label(warning, systemImage: "exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            }
+            HStack {
+                Spacer()
+                Button("취소", action: discard)
+                Button("적용", action: apply).buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(10)
+        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.accentColor.opacity(0.3)))
     }
 }
 

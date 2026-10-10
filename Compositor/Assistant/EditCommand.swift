@@ -15,6 +15,20 @@ extension LayerRef: Codable {
     private enum CodingKeys: String, CodingKey { case id, name, active, index }
 
     init(from decoder: Decoder) throws {
+        // The on-device model often writes a bare `"layer": "Sky"` or `"layer": 0` instead of an
+        // object, and it gives up rather than retrying after a decode error — so accept those
+        // unambiguous shorthands: a string is a name (or an id, if it parses as one), an integer
+        // an index.
+        if let single = try? decoder.singleValueContainer() {
+            if let text = try? single.decode(String.self) {
+                self = UUID(uuidString: text).map(LayerRef.id) ?? .name(text)
+                return
+            }
+            if let index = try? single.decode(Int.self) {
+                self = .index(index)
+                return
+            }
+        }
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if let value = try container.decodeIfPresent(UUID.self, forKey: .id) { self = .id(value); return }
         if let value = try container.decodeIfPresent(String.self, forKey: .name) { self = .name(value); return }
@@ -87,19 +101,82 @@ extension QueryRenderCanvas: Codable {
     }
 }
 
+struct LayerAdd: Codable, Equatable, Sendable {
+    /// Optional so a later command in the same proposal can refer to the new layer by name —
+    /// proposals run only after approval, so the model never sees the new layer's id.
+    var name: String?
+}
+
+struct LayerRename: Codable, Equatable, Sendable {
+    var layer: LayerRef
+    var name: String
+}
+
+struct LayerSetVisibility: Codable, Equatable, Sendable {
+    var layer: LayerRef
+    var visible: Bool
+}
+
+struct LayerSetOpacity: Codable, Equatable, Sendable {
+    var layer: LayerRef
+    /// 0–1, as stored. Values outside that range are rejected rather than clamped, so a model
+    /// that sends 60 for 60% is told so instead of silently getting 100%.
+    var opacity: Double
+}
+
+struct LayerSetBlendMode: Codable, Equatable, Sendable {
+    var layer: LayerRef
+    /// A `LayerBlendMode` raw value such as "Multiply"; matched case-insensitively.
+    var blendMode: String
+}
+
+struct LayerDelete: Codable, Equatable, Sendable {
+    var layer: LayerRef
+}
+
 /// A command the assistant can ask the app to run. Every case is a thin adapter over an
 /// existing `EditorSession` entry point — see CLAUDE.md part 2 for why no case may reimplement
 /// pixel logic, validation, or undo of its own.
 ///
-/// Stage 1 (the current stage) only defines `query.*` cases, which read state and never call
-/// `beginEdit`/`endEdit`. Later stages add `layer.*`, `selection.*`, `mask.*`, `adjustment.*`,
-/// `filter.*`, and so on, following the family table in CLAUDE.md 2.4.
-enum EditCommand: Sendable {
+/// `query.*` cases read state and never call `beginEdit`/`endEdit`. Stage 2's `layer.*` cases
+/// change the document; the assistant never runs them directly but queues them as a proposal
+/// the person approves (CLAUDE.md 2.8), which `EditCommandRunner.applyBatch` then runs as one
+/// undo step.
+enum EditCommand: Equatable, Sendable {
     case queryDescribeDocument
     case queryDescribeLayer(QueryDescribeLayer)
     case queryRenderCanvas(QueryRenderCanvas)
     case queryGetHistory
     case queryGetCapabilities
+    case layerAdd(LayerAdd)
+    case layerRename(LayerRename)
+    case layerSetVisibility(LayerSetVisibility)
+    case layerSetOpacity(LayerSetOpacity)
+    case layerSetBlendMode(LayerSetBlendMode)
+    case layerDelete(LayerDelete)
+
+    /// Whether running this changes the document — and so must go through approval.
+    var mutatesDocument: Bool {
+        switch self {
+        case .queryDescribeDocument, .queryDescribeLayer, .queryRenderCanvas, .queryGetHistory, .queryGetCapabilities:
+            false
+        case .layerAdd, .layerRename, .layerSetVisibility, .layerSetOpacity, .layerSetBlendMode, .layerDelete:
+            true
+        }
+    }
+
+    /// The layer this command targets, if any.
+    var layerRef: LayerRef? {
+        switch self {
+        case .queryDescribeLayer(let a): a.layer
+        case .layerRename(let a): a.layer
+        case .layerSetVisibility(let a): a.layer
+        case .layerSetOpacity(let a): a.layer
+        case .layerSetBlendMode(let a): a.layer
+        case .layerDelete(let a): a.layer
+        case .queryDescribeDocument, .queryRenderCanvas, .queryGetHistory, .queryGetCapabilities, .layerAdd: nil
+        }
+    }
 }
 
 extension EditCommand: Decodable {
@@ -119,6 +196,18 @@ extension EditCommand: Decodable {
             self = .queryGetHistory
         case "query.getCapabilities":
             self = .queryGetCapabilities
+        case "layer.add":
+            self = .layerAdd(try container.decodeIfPresent(LayerAdd.self, forKey: .arguments) ?? LayerAdd())
+        case "layer.rename":
+            self = .layerRename(try container.decode(LayerRename.self, forKey: .arguments))
+        case "layer.setVisibility":
+            self = .layerSetVisibility(try container.decode(LayerSetVisibility.self, forKey: .arguments))
+        case "layer.setOpacity":
+            self = .layerSetOpacity(try container.decode(LayerSetOpacity.self, forKey: .arguments))
+        case "layer.setBlendMode":
+            self = .layerSetBlendMode(try container.decode(LayerSetBlendMode.self, forKey: .arguments))
+        case "layer.delete":
+            self = .layerDelete(try container.decode(LayerDelete.self, forKey: .arguments))
         default:
             throw EditCommandError.unknownCommand(name)
         }
@@ -134,6 +223,13 @@ enum EditCommandError: Error, Equatable, Sendable {
     case layerNotFound(LayerRef)
     case ambiguousLayerReference(LayerRef, matchCount: Int)
     case renderFailed(String)
+    /// The person has something open that the matching menu item would also wait for.
+    case busy(String)
+    /// Valid, but something the assistant isn't allowed to do on its own (it would need a choice
+    /// only the person can make).
+    case notSupported(String)
+    /// The session method ran but the document didn't change, e.g. its own guard refused.
+    case notApplied(String)
 
     var code: String {
         switch self {
@@ -143,6 +239,9 @@ enum EditCommandError: Error, Equatable, Sendable {
         case .layerNotFound: "layer_not_found"
         case .ambiguousLayerReference: "ambiguous_layer_reference"
         case .renderFailed: "render_failed"
+        case .busy: "busy"
+        case .notSupported: "not_supported"
+        case .notApplied: "not_applied"
         }
     }
 
@@ -160,6 +259,12 @@ enum EditCommandError: Error, Equatable, Sendable {
             "\(matchCount) layers match \(ref); refer to it by id instead."
         case .renderFailed(let reason):
             "The canvas could not be rendered: \(reason)"
+        case .busy(let blocker):
+            "The document can't be edited right now: \(blocker)."
+        case .notSupported(let reason):
+            reason
+        case .notApplied(let what):
+            "\(what) did not change the document."
         }
     }
 
@@ -170,6 +275,7 @@ enum EditCommandError: Error, Equatable, Sendable {
         case .invalidArguments: "argumentsJSON must be a JSON object matching this command's schema — see query.getCapabilities."
         case .ambiguousLayerReference: "query.describeDocument lists every layer's id."
         case .layerNotFound: "query.describeDocument lists every layer's id and name."
+        case .busy: "Wait for the person to finish, then try again."
         default: ""
         }
     }

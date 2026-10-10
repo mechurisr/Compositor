@@ -66,6 +66,11 @@ final class EditCommandRunner: @unchecked Sendable {
 
         case .queryGetCapabilities:
             return .success(.capabilities(EditCommandCatalog.commands))
+
+        case .layerAdd, .layerRename, .layerSetVisibility, .layerSetOpacity, .layerSetBlendMode, .layerDelete:
+            // Edits never run one at a time from here: they are proposed (`propose`) and, once the
+            // person approves, run together as one undo step (`applyBatch`).
+            return .failure(.notSupported("\(command.name) changes the document, so it must be proposed and approved."))
         }
     }
 
@@ -94,7 +99,7 @@ final class EditCommandRunner: @unchecked Sendable {
     /// Resolution rule shared by every command that takes a `LayerRef`: `.name` must be unique
     /// among the document's layers, since two layers may share a name and only the model's next
     /// command — carrying the resolved id this returns — can be certain which one was meant.
-    private func resolveLayer(_ ref: LayerRef) -> Result<ImageLayer, EditCommandError> {
+    func resolveLayer(_ ref: LayerRef) -> Result<ImageLayer, EditCommandError> {
         guard let document = session.document else { return .failure(.noDocument) }
         switch ref {
         case .id(let id):

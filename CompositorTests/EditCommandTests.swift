@@ -107,7 +107,8 @@ struct EditCommandTests {
         let result = await runner.run(.queryGetCapabilities)
         guard case .success(.capabilities(let commands)) = result else { Issue.record("expected capabilities"); return }
         #expect(Set(commands.map(\.name)) == Set(EditCommandCatalog.commandNames))
-        #expect(commands.allSatisfy { $0.mutatesDocument == false })
+        #expect(commands.filter { $0.name.hasPrefix("query.") }.allSatisfy { $0.mutatesDocument == false })
+        #expect(commands.filter { $0.name.hasPrefix("layer.") }.allSatisfy { $0.mutatesDocument })
     }
 
     @Test func decodesWireFormatFromJSON() throws {
@@ -122,17 +123,17 @@ struct EditCommandTests {
 
     @Test func unknownCommandNameFailsWithAStructuredError() throws {
         let json = """
-        { "command": "layer.setOpacity", "arguments": {} }
+        { "command": "filter.apply", "arguments": {} }
         """.data(using: .utf8)!
         do {
             _ = try JSONDecoder().decode(EditCommand.self, from: json)
             Issue.record("expected a decoding failure")
         } catch let error as EditCommandError {
-            #expect(error == .unknownCommand("layer.setOpacity"))
+            #expect(error == .unknownCommand("filter.apply"))
         }
     }
 
-    /// `runJSON` is what `CompositorTool.call(arguments:)` actually goes through, so this is
+    /// `runJSON` is what the assistant tools (`CompositorToolBackend`) go through, so this is
     /// the path a model's tool call exercises — checked here without needing a live model.
     @Test func runJSONSucceedsAndFailsAsStructuredEnvelopes() async throws {
         let session = EditorSession()
@@ -141,7 +142,7 @@ struct EditCommandTests {
         let capabilities = await runner.runJSON(command: "query.getCapabilities", argumentsJSON: "{}")
         #expect(try JSONDecoder().decode(ToolEnvelopeProbe.self, from: Data(capabilities.utf8)).ok == true)
 
-        let unknown = await runner.runJSON(command: "layer.setOpacity", argumentsJSON: "{}")
+        let unknown = await runner.runJSON(command: "filter.apply", argumentsJSON: "{}")
         let unknownProbe = try JSONDecoder().decode(ToolEnvelopeProbe.self, from: Data(unknown.utf8))
         #expect(unknownProbe.ok == false)
         #expect(unknownProbe.errorCode == "unknown_command")
@@ -158,7 +159,7 @@ struct EditCommandTests {
         #expect(noDocumentProbe.errorCode == "no_document")
     }
 
-    /// `CompositorTool` decodes `query.renderCanvas` itself to pick the image path, so a
+    /// `CompositorToolBackend` decodes `query.renderCanvas` itself to pick the image path, so a
     /// wrong-typed argument must still come back as an error rather than a default render.
     @Test func decodeRejectsWrongTypedRenderArguments() {
         let decoded = EditCommandRunner.decode(command: "query.renderCanvas", argumentsJSON: "{\"maxSide\":\"512\"}")

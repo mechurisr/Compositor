@@ -14,7 +14,13 @@ struct EditCommandCatalogTests {
         "query.describeLayer": "{ \"layer\": { \"active\": true } }",
         "query.renderCanvas": "{}",
         "query.getHistory": "{}",
-        "query.getCapabilities": "{}"
+        "query.getCapabilities": "{}",
+        "layer.add": "{}",
+        "layer.rename": "{ \"layer\": { \"active\": true }, \"name\": \"Sky\" }",
+        "layer.setVisibility": "{ \"layer\": { \"active\": true }, \"visible\": false }",
+        "layer.setOpacity": "{ \"layer\": { \"active\": true }, \"opacity\": 0.5 }",
+        "layer.setBlendMode": "{ \"layer\": { \"active\": true }, \"blendMode\": \"Multiply\" }",
+        "layer.delete": "{ \"layer\": { \"active\": true } }"
     ]
 
     @Test func catalogListsExactlyTheImplementedCommands() {
@@ -29,7 +35,14 @@ struct EditCommandCatalogTests {
         }
     }
 
-    @Test func everyCatalogEntryIsReadOnlyInStageOne() {
-        #expect(EditCommandCatalog.commands.allSatisfy { !$0.mutatesDocument })
+    /// The catalog's flag is what the model reads; `EditCommand.mutatesDocument` is what decides
+    /// whether a call is proposed for approval. They must agree.
+    @MainActor @Test func catalogMutationFlagMatchesTheCommand() throws {
+        for descriptor in EditCommandCatalog.commands {
+            let arguments = try #require(Self.implementedCommands[descriptor.name])
+            let command = try EditCommandRunner.decode(command: descriptor.name, argumentsJSON: arguments).get()
+            #expect(command.mutatesDocument == descriptor.mutatesDocument, "\(descriptor.name)")
+            #expect(command.name == descriptor.name)
+        }
     }
 }

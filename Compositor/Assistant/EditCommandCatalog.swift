@@ -50,6 +50,49 @@ enum EditCommandCatalog {
             mutatesDocument: false,
             argumentsSketch: "{}",
             preconditions: "None."
+        ),
+        // Edits are proposed, not run: the person approves them, and they apply as one undo step.
+        CommandDescriptor(
+            name: "layer.add",
+            summary: "Adds an empty layer above the active one (inside the active folder). Give it a name to refer to it in later edits of the same proposal.",
+            mutatesDocument: true,
+            argumentsSketch: "{ name?: String }",
+            preconditions: "A document must be open. Proposed for approval; runs only when the person presses Apply."
+        ),
+        CommandDescriptor(
+            name: "layer.rename",
+            summary: "Renames a layer or folder.",
+            mutatesDocument: true,
+            argumentsSketch: "{ layer: LayerRef, name: String }",
+            preconditions: "`layer` must resolve to one layer; `name` must not be empty. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "layer.setVisibility",
+            summary: "Shows or hides a layer or folder.",
+            mutatesDocument: true,
+            argumentsSketch: "{ layer: LayerRef, visible: Bool }",
+            preconditions: "`layer` must resolve to one layer. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "layer.setOpacity",
+            summary: "Sets a layer's or folder's opacity. A folder's opacity multiplies into each layer inside it.",
+            mutatesDocument: true,
+            argumentsSketch: "{ layer: LayerRef, opacity: Double (0–1; 60% is 0.6) }",
+            preconditions: "`layer` must resolve to one layer; opacity outside 0–1 is rejected. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "layer.setBlendMode",
+            summary: "Sets a layer's blend mode, e.g. \"Multiply\", \"Screen\", \"Overlay\" (Photoshop names).",
+            mutatesDocument: true,
+            argumentsSketch: "{ layer: LayerRef, blendMode: String }",
+            preconditions: "`layer` must resolve to a layer that is not a folder (folders always blend as Normal). Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "layer.delete",
+            summary: "Deletes a layer, or a folder together with everything inside it.",
+            mutatesDocument: true,
+            argumentsSketch: "{ layer: LayerRef }",
+            preconditions: "`layer` must resolve to one layer that supplies no live mask to other layers. Proposed for approval."
         )
     ]
 

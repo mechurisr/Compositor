@@ -38,7 +38,7 @@ struct AssistantSessionTests {
     /// by the on-device model (it guessed "red" for every color), so this only passes if
     /// `AssistantSession` re-asks with the render attached directly.
     @Test func seesTheCanvasColorWhenVisionIsAvailable() async throws {
-        guard case .available = SystemLanguageModel.default.availability, CompositorTool.modelCanSee else {
+        guard case .available = SystemLanguageModel.default.availability, CompositorToolBackend.modelCanSee else {
             return
         }
         let editor = EditorSession()
@@ -65,6 +65,43 @@ struct AssistantSessionTests {
         let reply = await session.send("캔버스 크기가 어떻게 돼?")
         #expect(reply.contains("320") && reply.contains("240"), "reply was: \(reply)")
         #expect(reply.unicodeScalars.contains { (0xAC00...0xD7A3).contains($0.value) }, "reply was: \(reply)")
+    }
+
+    /// A Korean edit request ends as a proposal (not a direct edit), and applying it changes the
+    /// document as one undo step.
+    @Test func proposesAnEditInsteadOfApplyingItAndAppliesOnApproval() async throws {
+        guard case .available = SystemLanguageModel.default.availability else { return }
+        let editor = EditorSession()
+        editor.createDocument(width: 200, height: 100, emptyLayer: true)
+        let before = editor.document
+        let undoCount = editor.history.undoCount
+
+        let session = AssistantSession(editorSession: editor)
+        let reply = await session.send("Layer 1 불투명도를 50%로 바꿔줘")
+        #expect(editor.document == before, "edits must wait for approval")
+        let proposal = try #require(session.proposal, "no proposal; reply was: \(reply)")
+        #expect(proposal.edits.contains { $0.command == .layerSetOpacity(LayerSetOpacity(layer: .id(editor.activeLayerID!), opacity: 0.5)) },
+                "proposed: \(proposal.edits.map(\.summary))")
+
+        await session.applyProposal()
+        #expect(session.proposal == nil)
+        #expect(editor.document?.layers.first?.opacity == 0.5)
+        #expect(editor.history.undoCount == undoCount + 1)
+    }
+
+    @Test func aProposalIsNotAppliedAfterThePersonEditsTheDocument() async throws {
+        guard case .available = SystemLanguageModel.default.availability else { return }
+        let editor = EditorSession()
+        editor.createDocument(width: 200, height: 100, emptyLayer: true)
+        let session = AssistantSession(editorSession: editor)
+        _ = await session.send("Layer 1을 숨겨줘")
+        guard session.proposal != nil else { return } // The model's call; covered by the test above.
+
+        editor.addBlankLayer() // The person edits before approving.
+        let after = editor.document
+        await session.applyProposal()
+        #expect(editor.document == after)
+        #expect(session.messages.last?.text.contains("바뀌어서") == true)
     }
 
     /// The app ships only an English localization, so the directive must follow the person's
