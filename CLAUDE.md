@@ -369,7 +369,7 @@ struct EditBatch: Codable { let label: String; let commands: [EditCommand]; var 
 
 ## 2.9 통합 지점
 
-- `ProjectTab`(`ProjectWorkspace.swift:6`)에 `session`/`controller` 옆에 `assistant: AssistantSession`을 추가 — **탭마다 독립 대화**. 기존 탭별 소유 구조와 일치한다. **미구현**: 지금은 `ContentView`가 자기 `init`에서 `AssistantSession`을 직접 만든다(2.13). 탭 전환 시 대화가 유지되는지는 아직 검증 안 됐다.
+- `ProjectTab`(`ProjectWorkspace.swift:6`)에 `session`/`controller` 옆에 `assistant: AssistantSession`을 추가 — **탭마다 독립 대화**. 기존 탭별 소유 구조와 일치한다. **구현됨**: `ProjectTab.assistant`. `ContentView`는 `.id(tab.id)`로 탭 전환마다 재생성되므로 어시스턴트를 만들면 안 되고 받기만 한다. 패널은 화면에 하나 — 열려 있으면 `ProjectWorkspace.selectedID`의 `didSet`(`handOffAssistantPanel`)이 이전 탭 패널을 닫고 새 탭 패널을 연다(`FloatingPanelController`는 해제돼도 패널을 닫지 않으므로, 이걸 안 하면 이전 탭 문서에 대해 답하는 패널이 남는다).
 - 패널은 `ProjectWorkspaceView` / `ContentView.swift`에 사이드바로. **구현은 사이드바가 아니라 기존 `FloatingPanelController` 패턴**(Levels/Hue-Saturation/Keyboard Shortcuts와 동일) — 툴바의 sparkles 아이콘이 토글한다.
 - API 키는 Keychain. 네트워크 엔타이틀먼트는 **이미 켜져 있다**(`Config/Compositor.entitlements`). **온디바이스 기본 경로는 키·네트워크가 전혀 필요 없다** — 이 항목은 Anthropic 업그레이드 경로에만 해당.
 
@@ -423,7 +423,7 @@ Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실기기�
 1. **`AssistantClient.swift`(Anthropic HTTP 클라이언트)를 만들지 않았다.** 대신 macOS `FoundationModels`(온디바이스 모델)를 기본 백엔드로 썼다 — **API 키·네트워크·서버 비용 전혀 없이 "무료 기본값"을 만들 수 있어서.** `SystemLanguageModel.default.availability`가 `.available`/`.unavailable(reason)`을 주고, 안 되면 이유를 그대로 패널에 보여준다(기기 미지원/Apple Intelligence 꺼짐/모델 준비 중).
 2. **명령마다 `Tool`을 만들지 않고 `Tool` 하나(`CompositorTool`)로 접었다.** Apple 문서가 "요청당 툴 3–5개"를 권장하는데 Stage 1만 해도 5개 명령이라 명령마다 툴을 만드는 건 이 한도를 바로 넘는다. `CompositorTool.Arguments`는 `{command, argumentsJSON}` 뿐이고, 실제 스키마 검증은 여전히 `EditCommand`의 `Decodable`이 한다 — 2.1의 "새 변경 경로를 만들지 않는다" 원칙과 같은 이유로, 이 얇은 어댑터도 두 번 만들지 않았다.
 3. **`EditCommandRunner`에 `runJSON(command:argumentsJSON:)`이 추가됐다** — 문자열 in/out, `FoundationModels`를 import하지 않는다. 모델의 tool call이 실제로 거치는 경로이면서, 모델 없이도(`EditCommandTests`) 테스트할 수 있는 이유다.
-4. **패널은 사이드바가 아니라 `FloatingPanelController`**(기존 Levels/Hue-Saturation/Keyboard Shortcuts와 같은 패턴)로 구현했다. `ProjectTab`에 `assistant`를 얹는 2.9 계획은 아직 안 했고, 지금은 `ContentView`가 직접 소유한다 — 탭을 넘나들 때 대화가 유지되는지는 검증 전이다.
+4. **패널은 사이드바가 아니라 `FloatingPanelController`**(기존 Levels/Hue-Saturation/Keyboard Shortcuts와 같은 패턴)로 구현했다. 소유는 2.9 계획대로 `ProjectTab.assistant`(2026-10-10).
 5. **결과 컨트랙트가 2.5와 조금 다르다.** 쓰기 명령이 아직 없어서 `undoName`/`digestDelta`는 없고, `runJSON`은 `{ok, output}` 또는 `{ok:false, errorCode, errorMessage, errorHint}`만 돌려준다. 쓰기 패밀리가 들어올 때 `undoName`/`resolvedIDs`/`warnings`를 추가해야 한다.
 6. **디코드는 `EditCommandRunner.decode(command:argumentsJSON:)` 한 곳**이고, 실패 봉투는 `EditCommandRunner.failureJSON(_:)`이 만든다. 특정 명령을 특별 취급하는 호출자(`CompositorTool`의 renderCanvas)도 이 둘을 거쳐야 한다 — 직접 JSON을 디코드하거나 문자열 보간으로 에러 JSON을 만들지 말 것.
 
@@ -447,7 +447,7 @@ Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실기기�
 
 ### Stage 1 남은 일
 
-- `ProjectTab`에 `assistant` 이전 — 탭별 대화 분리 (2.9).
+- ~~`ProjectTab`에 `assistant` 이전 — 탭별 대화 분리 (2.9)~~ → 완료. 테스트: `ProjectWorkspaceTests.eachTabKeepsItsOwnAssistant`, `assistantPanelFollowsTheCurrentTab`.
 - 패널이 마크다운을 렌더하지 않는다(`**`가 그대로 보임).
 - Anthropic(또는 다른 클라우드 모델) 업그레이드 경로 설계 — `LanguageModel`/`LanguageModelExecutor` 커스텀 백엔드로 `AssistantSession`/`CompositorTool`을 그대로 재사용할 수 있는지 검증.
 - API 키 저장 방식(Keychain) — 업그레이드 경로를 실제로 만들 때.

@@ -7,19 +7,29 @@ final class ProjectTab: Identifiable {
     let id = UUID()
     let session: EditorSession
     let controller: ProjectController
+    /// Owned here rather than by `ContentView`, which is rebuilt on every tab switch: each tab
+    /// keeps its own conversation, about its own document.
+    let assistant: AssistantSession
     let defaultName: String
     var title: String { session.projectURL?.deletingPathExtension().lastPathComponent ?? defaultName }
     init(name: String) {
         defaultName = name
         session = EditorSession()
         controller = ProjectController(session: session)
+        assistant = AssistantSession(editorSession: session)
     }
 }
 
 @MainActor @Observable
 final class ProjectWorkspace {
     private(set) var tabs: [ProjectTab] = []
-    private(set) var selectedID: UUID
+    private(set) var selectedID: UUID {
+        didSet { handOffAssistantPanel() }
+    }
+    /// The tab whose assistant panel may be on screen. Every path that changes the tab — select,
+    /// new, open, close — goes through `selectedID`, so the hand-off lives in its `didSet`. Held
+    /// strongly so a tab that was just removed can still close its panel.
+    @ObservationIgnored private var assistantPanelOwner: AssistantSession
     var isManaging = false
     @ObservationIgnored weak var window: NSWindow?
     @ObservationIgnored private var nextNumber = 2
@@ -33,7 +43,19 @@ final class ProjectWorkspace {
         let first = ProjectTab(name: "Untitled")
         first.session.skipsInitialClipboardCanvasSize = true
         tabs = [first]; selectedID = first.id
+        assistantPanelOwner = first.assistant
         first.controller.workspace = self
+    }
+    /// One assistant panel on screen, following the current tab: an open panel closes for the tab
+    /// being left and reopens, with that tab's own conversation, for the tab now shown. Otherwise
+    /// the old panel stayed up answering about the previous tab's document.
+    private func handOffAssistantPanel() {
+        let previous = assistantPanelOwner
+        let next = current.assistant
+        assistantPanelOwner = next
+        guard previous !== next, previous.isPanelVisible else { return }
+        previous.closePanel()
+        next.showPanel()
     }
     @discardableResult
     func addTab(reuseEmpty: Bool = true) -> ProjectTab {
@@ -114,6 +136,7 @@ final class ProjectWorkspace {
     }
     func closeWindow(_ window: NSWindow) async {
         guard await confirmQuit() else { return }
+        current.assistant.closePanel() // Not handed to the fresh tab: the window is going away.
         tabs.removeAll(); _ = addTab(reuseEmpty: false)
         window.close()
     }

@@ -20,6 +20,47 @@ import Testing
         #expect(!workspace.current.session.showsNewDocument)
     }
 
+    @Test func eachTabKeepsItsOwnAssistant() {
+        let workspace = ProjectWorkspace()
+        let first = workspace.current
+        first.session.createDocument(width: 100, height: 100)
+        workspace.newCanvas()
+        let second = workspace.current
+        #expect(first.assistant !== second.assistant)
+
+        workspace.select(first.id)
+        #expect(workspace.current.assistant === first.assistant)
+    }
+
+    /// An open assistant panel follows the tab on screen instead of staying up for the old tab.
+    @Test func assistantPanelFollowsTheCurrentTab() async {
+        // No documents, so closing a tab never stops for a save prompt.
+        let workspace = ProjectWorkspace()
+        let first = workspace.current
+        first.assistant.showPanel()
+        #expect(first.assistant.isPanelVisible)
+
+        workspace.newCanvas()
+        let second = workspace.current
+        #expect(!first.assistant.isPanelVisible)
+        #expect(second.assistant.isPanelVisible)
+
+        workspace.select(first.id)
+        #expect(first.assistant.isPanelVisible)
+        #expect(!second.assistant.isPanelVisible)
+
+        // Closing the shown tab hands the panel to the tab that takes its place.
+        await workspace.close(first.id)
+        #expect(workspace.current === second)
+        #expect(second.assistant.isPanelVisible)
+        second.assistant.closePanel()
+
+        // A closed panel stays closed across switches.
+        workspace.newCanvas()
+        #expect(!second.assistant.isPanelVisible)
+        #expect(!workspace.current.assistant.isPanelVisible)
+    }
+
     @Test func layerDropProviderCopiesIntoANewProject() async throws {
         let workspace = ProjectWorkspace()
         let source = workspace.current

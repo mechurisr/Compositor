@@ -6,7 +6,9 @@ struct ContentView: View {
     @AppStorage("layersPanelWidth") private var layersPanelWidth = 252.0
     @Bindable var session: EditorSession
     var applicationDelegate: CompositorApplicationDelegate? = nil
-    @State private var assistant: AssistantSession
+    /// The tab's own assistant (`ProjectTab.assistant`), not created here: this view is rebuilt
+    /// on every tab switch, which would throw the conversation away each time.
+    let assistant: AssistantSession
     @Environment(\.openWindow) private var openWindow
     @State private var canvasFrame: CGRect = .zero
     @State private var levelsPanel = FloatingPanelController(name: "levelsPanel")
@@ -18,10 +20,10 @@ struct ContentView: View {
     /// The window's width, so the tab strip can use the toolbar's free space.
     @State private var windowWidth: CGFloat = 1180
 
-    init(session: EditorSession, applicationDelegate: CompositorApplicationDelegate? = nil) {
+    init(session: EditorSession, assistant: AssistantSession, applicationDelegate: CompositorApplicationDelegate? = nil) {
         self.session = session
+        self.assistant = assistant
         self.applicationDelegate = applicationDelegate
-        _assistant = State(initialValue: AssistantSession(editorSession: session))
     }
 
     /// A layer dragged from this canvas's own tab has nowhere to go, so the canvas doesn't light up for it.

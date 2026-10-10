@@ -43,8 +43,10 @@ final class AssistantSession {
 
     func closePanel() { panel.close() }
 
+    var isPanelVisible: Bool { panel.isVisible }
+
     func togglePanel() {
-        if panel.isVisible { closePanel() } else { showPanel() }
+        if isPanelVisible { closePanel() } else { showPanel() }
     }
 
     /// Apple Intelligence can be turned on, finish downloading, or become unavailable while the
