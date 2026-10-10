@@ -2,6 +2,7 @@ import FoundationModels
 import Observation
 import Foundation
 import SwiftUI
+import NaturalLanguage
 
 struct AssistantMessage: Identifiable {
     enum Role { case user, assistant }
@@ -28,6 +29,7 @@ final class AssistantSession {
     private(set) var messages: [AssistantMessage] = []
     private var languageSession: LanguageModelSession?
     private let runner: EditCommandRunner
+    @ObservationIgnored private let canvasMailbox = CanvasImageMailbox()
     @ObservationIgnored private let panel = FloatingPanelController(name: "assistantPanel")
 
     init(editorSession: EditorSession) {
@@ -65,15 +67,17 @@ final class AssistantSession {
     }
 
     private func makeSession() -> LanguageModelSession {
-        LanguageModelSession(tools: [CompositorTool(runner: runner)], instructions: Self.instructions)
+        LanguageModelSession(tools: [CompositorTool(runner: runner, mailbox: canvasMailbox)], instructions: Self.instructions())
     }
 
-    private static let instructions = """
+    private static let baseInstructions = """
         You are an assistant embedded in Compositor, a macOS image editor. You can inspect the \
         open document by calling the compositorCommand tool with a command name and its JSON \
         arguments; call "query.getCapabilities" first if you don't already know what commands \
         exist, and "query.describeDocument" to see the canvas, its layers, and the current \
-        selection before answering questions about them.
+        selection before answering questions about them. Whenever a question is about what the \
+        canvas looks like — what is drawn on it, its colors, or its content — call \
+        "query.renderCanvas" to see it.
 
         Non-obvious facts about this app: coordinates are document pixels with the origin at the \
         top left, y increasing downward, and rotation clockwise. Layers are bottom-to-top in a \
@@ -87,6 +91,44 @@ final class AssistantSession {
         before trying again.
         """
 
+    /// For a non-English speaker, only a soft same-language nudge — never the language's name.
+    /// Measured on the on-device model: naming the language ("You MUST respond in Korean", or even
+    /// "write your final reply in Korean") together with a Korean question stopped it from calling
+    /// tools at all (0 of 3), so it narrated plans and invented answers instead. This nudge keeps
+    /// tool calling (3 of 3) but only gets the language right most of the time, so `localized(_:)`
+    /// translates whatever still comes back in the wrong language.
+    static func instructions(preferredLanguages: [String] = Locale.preferredLanguages) -> String {
+        guard replyLanguageCode(preferredLanguages: preferredLanguages) != nil else { return baseInstructions }
+        return baseInstructions + "\n\nAlways reply in the same language the person writes in."
+    }
+
+    /// The language replies should end up in, or `nil` for English (nothing to do). Reads
+    /// `Locale.preferredLanguages` rather than `Locale.current`: the app ships only an English
+    /// localization, so `Locale.current` resolves to English (e.g. `en_KR`) even for a person
+    /// whose system language is Korean.
+    static func replyLanguageCode(preferredLanguages: [String] = Locale.preferredLanguages) -> String? {
+        guard let preferred = preferredLanguages.first,
+              let code = Locale(identifier: preferred).language.languageCode?.identifier,
+              code != "en" else { return nil }
+        return code
+    }
+
+    /// Translates `reply` into the person's language when the tool-using session answered in
+    /// another one (English tool output and the English canvas follow-up prompt pull it that
+    /// way). A separate tool-free session, so naming the language here can't disturb tool calls.
+    private func localized(_ reply: String) async -> String {
+        guard let code = Self.replyLanguageCode() else { return reply }
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(reply)
+        guard let detected = recognizer.dominantLanguage, detected != NLLanguage(rawValue: code) else { return reply }
+        let languageName = Locale(identifier: "en").localizedString(forLanguageCode: code) ?? code
+        let translator = LanguageModelSession(instructions: """
+            Translate the user's text into \(languageName). Output only the translation. Keep \
+            numbers, names, and identifiers unchanged.
+            """)
+        return (try? await translator.respond(to: reply).content) ?? reply
+    }
+
     /// Sends one user message and returns the model's reply.
     func send(_ text: String) async -> String {
         refreshAvailability()
@@ -95,13 +137,35 @@ final class AssistantSession {
             return "온디바이스 모델을 사용할 수 없습니다."
         }
         isResponding = true
-        defer { isResponding = false }
+        defer {
+            isResponding = false
+            _ = canvasMailbox.take() // Never let a stale render leak into the next turn.
+        }
         do {
             let response = try await languageSession.respond(to: text)
-            return response.content
+            // The model asked to see the canvas mid-turn. It couldn't actually see it then (images
+            // in tool output are ignored — see `CanvasImageMailbox`), so its reply is discarded
+            // and the question is re-asked once in the same session with the image attached
+            // directly. Only once: a render requested during the follow-up is dropped.
+            if #available(macOS 27.0, *), let image = canvasMailbox.take() {
+                let followUp = try await languageSession.respond(to: Self.canvasFollowUp(question: text, image: image))
+                return await localized(followUp.content)
+            }
+            return await localized(response.content)
         } catch {
             return "오류가 발생했습니다: \(error.localizedDescription)"
         }
+    }
+
+    @available(macOS 27.0, *)
+    @PromptBuilder
+    private static func canvasFollowUp(question: String, image: CGImage) -> Prompt {
+        """
+        Here is the canvas you asked to see with query.renderCanvas, rendered at \
+        \(image.width)x\(image.height) pixels. Using what you see in it, answer my earlier \
+        message: "\(question)"
+        """
+        Attachment(image)
     }
 
     /// What the chat panel calls: appends the user's message and the model's reply to

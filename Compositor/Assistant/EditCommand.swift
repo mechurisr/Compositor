@@ -69,7 +69,7 @@ extension QueryDescribeLayer: Codable {
     }
 }
 
-struct QueryRenderCanvas: Equatable, Sendable {
+nonisolated struct QueryRenderCanvas: Equatable, Sendable {
     var maxSide: Int = 1024
 }
 
@@ -167,6 +167,7 @@ enum EditCommandError: Error, Equatable, Sendable {
     var hint: String {
         switch self {
         case .unknownCommand: "Call query.getCapabilities for the list of commands this build supports."
+        case .invalidArguments: "argumentsJSON must be a JSON object matching this command's schema — see query.getCapabilities."
         case .ambiguousLayerReference: "query.describeDocument lists every layer's id."
         case .layerNotFound: "query.describeDocument lists every layer's id and name."
         default: ""

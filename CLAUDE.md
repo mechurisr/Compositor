@@ -400,7 +400,7 @@ struct EditBatch: Codable { let label: String; let commands: [EditCommand]; var 
 
 ## 2.13 구현 현황 — Stage 1 (2026-09-24, `ai-assistant` 브랜치)
 
-Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실행까지 확인됐다. 아래는 계획(2.1–2.12) 대비 실제로 달라진 점과 남은 일이다.
+Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실기기에서 실제 모델 응답까지 확인됐다(2026-10-10 갱신). 아래는 계획(2.1–2.12) 대비 실제로 달라진 점과 남은 일이다.
 
 ### 구현된 파일
 
@@ -411,8 +411,8 @@ Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실행까�
 | `Assistant/DocumentDigest.swift` | `DocumentDigest`/`LayerDigest`/`HistoryDigest`/`SelectionDigest`/`CanvasRenderDigest`. `ProjectManifest`를 그대로 재사용(2.6 계획대로). |
 | `Assistant/PNGEncoding.swift` | 캔버스 렌더 다운스케일 + PNG/base64 인코딩 (계획엔 없던 파일 — `ImageExporter`의 렌더 자체는 재사용하고, 리사이즈·인코딩만 새로 얇게 얹었다). |
 | `Assistant/EditCommandRunner.swift` | `@MainActor final class EditCommandRunner: @unchecked Sendable`. `run(_:)`은 타입 있는 `EditCommand`를 받고, **`runJSON(command:argumentsJSON:)`이 실제 진입점**(아래 참고). |
-| `Assistant/CompositorTool.swift` | `FoundationModels.Tool` 하나. `command`(String) + `argumentsJSON`(String)만 받아 `runJSON`으로 넘긴다. |
-| `Assistant/AssistantSession.swift` | `@MainActor @Observable`. `SystemLanguageModel.default.availability` 체크 → `LanguageModelSession(tools:instructions:)`. `messages`/`submit(_:)`로 채팅 상태, `showPanel()`/`closePanel()`/`togglePanel()`로 자기 `FloatingPanelController` 소유. |
+| `Assistant/CompositorTool.swift` | `FoundationModels.Tool` 하나. `command`(String) + `argumentsJSON`(String)만 받아 `runJSON`으로 넘긴다. 예외는 `query.renderCanvas` 하나 — 렌더한 `CGImage`를 `CanvasImageMailbox`에 맡기고 텍스트만 돌려준다(아래 "온디바이스 모델의 함정" 1). |
+| `Assistant/AssistantSession.swift` | `@MainActor @Observable`. `SystemLanguageModel.default.availability` 체크 → `LanguageModelSession(tools:instructions:)`. `messages`/`submit(_:)`로 채팅 상태, `showPanel()`/`closePanel()`/`togglePanel()`로 자기 `FloatingPanelController` 소유. 한 턴에 모델을 최대 3번 부른다: 도구 대화 → (메일박스에 캔버스가 있으면) 이미지를 직접 첨부해 재질문 → (답이 사용자 언어가 아니면) 도구 없는 세션으로 번역. |
 | `UI/AssistantPanel.swift` | 최소 채팅 SwiftUI 뷰. 가용성 배너 + "다시 확인" 버튼 + 메시지 목록 + 입력창. |
 | `Document/DocumentHistory.swift` | `revision`을 `private var` → `private(set) var`로. |
 | `ContentView.swift` | `@State private var assistant: AssistantSession`을 커스텀 `init`에서 `session`으로 생성. 툴바 `.primaryAction`에 sparkles 아이콘 버튼 → `assistant.togglePanel()`. |
@@ -425,21 +425,29 @@ Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실행까�
 3. **`EditCommandRunner`에 `runJSON(command:argumentsJSON:)`이 추가됐다** — 문자열 in/out, `FoundationModels`를 import하지 않는다. 모델의 tool call이 실제로 거치는 경로이면서, 모델 없이도(`EditCommandTests`) 테스트할 수 있는 이유다.
 4. **패널은 사이드바가 아니라 `FloatingPanelController`**(기존 Levels/Hue-Saturation/Keyboard Shortcuts와 같은 패턴)로 구현했다. `ProjectTab`에 `assistant`를 얹는 2.9 계획은 아직 안 했고, 지금은 `ContentView`가 직접 소유한다 — 탭을 넘나들 때 대화가 유지되는지는 검증 전이다.
 5. **결과 컨트랙트가 2.5와 조금 다르다.** 쓰기 명령이 아직 없어서 `undoName`/`digestDelta`는 없고, `runJSON`은 `{ok, output}` 또는 `{ok:false, errorCode, errorMessage, errorHint}`만 돌려준다. 쓰기 패밀리가 들어올 때 `undoName`/`resolvedIDs`/`warnings`를 추가해야 한다.
+6. **디코드는 `EditCommandRunner.decode(command:argumentsJSON:)` 한 곳**이고, 실패 봉투는 `EditCommandRunner.failureJSON(_:)`이 만든다. 특정 명령을 특별 취급하는 호출자(`CompositorTool`의 renderCanvas)도 이 둘을 거쳐야 한다 — 직접 JSON을 디코드하거나 문자열 보간으로 에러 JSON을 만들지 말 것.
+
+### 온디바이스 모델의 함정 (2026-10-10 실측 — 2단계 이후 지시문·도구를 바꿀 때 반드시 재확인)
+
+문서에 없는 동작이라 실험으로 확인했다. 지시문을 바꿀 때마다 실모델로 다시 측정할 것.
+
+1. **도구 출력 속 이미지는 모델에게 전달되지 않는다.** 도구가 `Prompt { Attachment(image) }`를 돌려주면 transcript에는 첨부가 남지만, 모델은 보지 못하고 지어낸다(파랑·초록·노랑 단색을 모두 "Red"라고 답함). 같은 이미지를 프롬프트에 직접 첨부하면 정확히 맞힌다. → `CanvasImageMailbox` 우회: 도구는 이미지를 맡기고 "다음 메시지로 온다"는 텍스트만 반환, `AssistantSession`이 같은 세션에서 이미지를 직접 첨부해 한 번 더 묻는다(턴당 1회). 비전 미지원 모델(`capabilities.contains(.vision) == false`)에 첨부하면 `unsupportedCapability`로 턴 전체가 실패하므로 그 경우는 크기만 반환.
+2. **지시문에 언어 이름을 쓰면 한국어 질문에서 도구 호출이 멈춘다.** "You MUST respond in Korean"(또는 "final reply in Korean", 프롬프트 끝의 "(Answer in Korean.)") + 한국어 질문 → 도구 호출 0/3, 대신 호출 계획·JSON을 답변 텍스트로 쓰거나 답을 지어낸다. 영어 질문이거나 언어 지시가 없으면 3/3. → 도구 세션에는 "Always reply in the same language the person writes in."만 넣고(이름 없이), 최종 답을 `NLLanguageRecognizer`로 확인해 사용자 언어가 아니면 **도구 없는 별도 세션**에서 번역한다(`localized(_:)`). 측정: 한국어 질문 6개 → 도구 6/6, 한국어 답 6/6. 번역 품질은 가끔 어색하다(일본어 문자 혼입 1회 관찰).
+3. 앱 현지화가 `en`뿐이라 `Locale.current`는 한국어 사용자에게도 영어(`en_KR`)로 잡힌다. 사용자 언어는 `Locale.preferredLanguages.first`로 읽는다.
 
 ### 테스트
 
-`EditCommandTests`(11개) + `EditCommandCatalogTests`(3개) + `AssistantSessionTests`(2개) — 전부 통과. `AssistantSessionTests`는 `SystemLanguageModel.default.availability`를 먼저 확인하고, `.available`이 아니면 해당 분기를 건너뛴다(Apple 공식 가이드가 권장하는 fallback 패턴과 동일) — CI나 Apple Intelligence가 꺼진 머신에서도 플레이키하지 않다.
+`EditCommandTests`(13개) + `EditCommandCatalogTests`(3개) + `AssistantSessionTests`(5개) — 전부 통과. `AssistantSessionTests`는 `SystemLanguageModel.default.availability`를 먼저 확인하고, `.available`이 아니면 해당 분기를 건너뛴다(Apple 공식 가이드가 권장하는 fallback 패턴과 동일) — CI나 Apple Intelligence가 꺼진 머신에서도 플레이키하지 않다. 실모델 테스트: 파란 캔버스의 색을 맞히는지(`seesTheCanvasColorWhenVisionIsAvailable`), 한국어 질문이 도구를 거쳐 한국어로 답하는지(`answersKoreanQuestionsInKoreanUsingTools`). 조건이 안 맞으면 조용히 통과하므로, 실제로 돌았는지는 실행 시간(수 초)으로 확인할 것.
 
-### 실기기 확인 상태 (2026-09-24)
+### 실기기 확인 상태 (2026-10-10)
 
-- M4 MacBook Air, macOS 27에서 sparkles 버튼 → 패널 → 텍스트 입력까지 **크래시 없이 동작 확인**.
-- `SystemLanguageModel.default.availability`가 이 머신에서 `.unavailable(.modelNotReady)`로 나옴 — 모델이 아직 다운로드/준비되지 않은 상태. Apple Intelligence 자체는 인식되고 있어서 기기/언어 문제로는 안 보인다.
-- macOS 27의 새 대화형 "Siri AI"는 한국어가 2026년 10월에야 추가될 예정이지만, 이건 별개 기능이고 우리가 쓰는 기본 `SystemLanguageModel`과는 무관해 보인다.
-- **재부팅 후 재확인 예정.**
+- M4 MacBook Air, macOS 27. 모델 `.available`, capabilities = vision + toolCalling + guidedGeneration.
+- 실제 일러스트 문서에 "캔버스에 뭐가 보여?" → 수련·코이·검은 고양이·"Nujabes Vibes" 글자까지 한국어로 정확히 설명.
+- Xcode `RunCodeSnippet`이 실행 중인 앱과 겹치면 SwiftUI 창 레이아웃에서 간헐적으로 크래시한다(앱 코드와 무관, 재실행하면 통과).
 
 ### Stage 1 남은 일
 
-- 실기기에서 모델이 준비된 뒤 실제 응답 확인 (query.describeDocument 등을 모델이 정확히 호출하는지).
 - `ProjectTab`에 `assistant` 이전 — 탭별 대화 분리 (2.9).
+- 패널이 마크다운을 렌더하지 않는다(`**`가 그대로 보임).
 - Anthropic(또는 다른 클라우드 모델) 업그레이드 경로 설계 — `LanguageModel`/`LanguageModelExecutor` 커스텀 백엔드로 `AssistantSession`/`CompositorTool`을 그대로 재사용할 수 있는지 검증.
 - API 키 저장 방식(Keychain) — 업그레이드 경로를 실제로 만들 때.

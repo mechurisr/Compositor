@@ -157,6 +157,32 @@ struct EditCommandTests {
         #expect(noDocumentProbe.ok == false)
         #expect(noDocumentProbe.errorCode == "no_document")
     }
+
+    /// `CompositorTool` decodes `query.renderCanvas` itself to pick the image path, so a
+    /// wrong-typed argument must still come back as an error rather than a default render.
+    @Test func decodeRejectsWrongTypedRenderArguments() {
+        let decoded = EditCommandRunner.decode(command: "query.renderCanvas", argumentsJSON: "{\"maxSide\":\"512\"}")
+        guard case .failure(let error) = decoded else {
+            Issue.record("Expected a decode failure, got \(decoded)")
+            return
+        }
+        #expect(error.code == "invalid_arguments")
+        #expect(!error.hint.isEmpty)
+
+        let valid = EditCommandRunner.decode(command: "query.renderCanvas", argumentsJSON: "{\"maxSide\":512}")
+        guard case .success(.queryRenderCanvas(let arguments)) = valid else {
+            Issue.record("Expected query.renderCanvas to decode, got \(valid)")
+            return
+        }
+        #expect(arguments.maxSide == 512)
+    }
+
+    @Test func failureJSONEscapesMessages() throws {
+        let json = EditCommandRunner.failureJSON(.renderFailed("bad \"quote\"\nand newline"))
+        let probe = try JSONDecoder().decode(ToolEnvelopeProbe.self, from: Data(json.utf8))
+        #expect(probe.ok == false)
+        #expect(probe.errorCode == "render_failed")
+    }
 }
 
 private struct ToolEnvelopeProbe: Decodable {

@@ -51,11 +51,8 @@ final class EditCommandRunner: @unchecked Sendable {
             }
 
         case .queryRenderCanvas(let arguments):
-            guard let snapshot = session.projectSnapshot() else { return .failure(.noDocument) }
             do {
-                let raster = try await ImageExporter.shared.render(snapshot)
-                let maxSide = min(max(arguments.maxSide, 1), 4096)
-                let fitted = try PNGEncoding.fitted(raster.image, maxSide: maxSide)
+                let fitted = try await renderCanvas(arguments)
                 let base64 = try PNGEncoding.base64(fitted)
                 return .success(.render(CanvasRenderDigest(width: fitted.width, height: fitted.height, pngBase64: base64)))
             } catch let error as EditCommandError {
@@ -69,6 +66,28 @@ final class EditCommandRunner: @unchecked Sendable {
 
         case .queryGetCapabilities:
             return .success(.capabilities(EditCommandCatalog.commands))
+        }
+    }
+
+    /// Shared by `run(_:)` and `renderCanvasImage(_:)`, which need the same render at two
+    /// different endpoints: one base64-encodes it for the plain-JSON result contract, the other
+    /// hands the `CGImage` itself to a caller that can attach it as real multimodal input.
+    private func renderCanvas(_ arguments: QueryRenderCanvas) async throws -> CGImage {
+        guard let snapshot = session.projectSnapshot() else { throw EditCommandError.noDocument }
+        let raster = try await ImageExporter.shared.render(snapshot)
+        let maxSide = min(max(arguments.maxSide, 1), 4096)
+        return try PNGEncoding.fitted(raster.image, maxSide: maxSide)
+    }
+
+    /// For a caller (the assistant's tool) that can give the model a real image rather than
+    /// inert base64 text it has no way to actually see.
+    func renderCanvasImage(_ arguments: QueryRenderCanvas) async -> Result<CGImage, EditCommandError> {
+        do {
+            return .success(try await renderCanvas(arguments))
+        } catch let error as EditCommandError {
+            return .failure(error)
+        } catch {
+            return .failure(.renderFailed(error.localizedDescription))
         }
     }
 
@@ -113,28 +132,37 @@ extension EditCommandRunner {
     /// back as `{"ok": false, ...}` so the caller can read and react to it, per CLAUDE.md 2.5's
     /// result contract.
     func runJSON(command name: String, argumentsJSON: String) async -> String {
-        let arguments = argumentsJSON.trimmingCharacters(in: .whitespacesAndNewlines)
-        let commandJSON = "{\"command\":\(Self.jsonString(name)),\"arguments\":\(arguments.isEmpty ? "{}" : arguments)}"
-        guard let data = commandJSON.data(using: .utf8) else {
-            return Self.encode(ToolResultEnvelope(ok: false, errorCode: "invalid_arguments",
-                errorMessage: "\(name)'s arguments were not valid UTF-8.", errorHint: ""))
-        }
-        let command: EditCommand
-        do {
-            command = try JSONDecoder().decode(EditCommand.self, from: data)
-        } catch let error as EditCommandError {
-            return Self.encode(ToolResultEnvelope(ok: false, errorCode: error.code, errorMessage: error.message, errorHint: error.hint))
-        } catch {
-            return Self.encode(ToolResultEnvelope(ok: false, errorCode: "invalid_arguments",
-                errorMessage: "\(name)'s arguments did not decode: \(error.localizedDescription)",
-                errorHint: "argumentsJSON must be a JSON object matching this command's schema — see query.getCapabilities."))
-        }
-        switch await run(command) {
-        case .success(let output):
-            return Self.encode(ToolResultEnvelope(ok: true, output: output))
+        switch Self.decode(command: name, argumentsJSON: argumentsJSON) {
         case .failure(let error):
-            return Self.encode(ToolResultEnvelope(ok: false, errorCode: error.code, errorMessage: error.message, errorHint: error.hint))
+            return Self.failureJSON(error)
+        case .success(let command):
+            switch await run(command) {
+            case .success(let output):
+                return Self.encode(ToolResultEnvelope(ok: true, output: output))
+            case .failure(let error):
+                return Self.failureJSON(error)
+            }
         }
+    }
+
+    /// The one place a command name plus a JSON arguments blob becomes an `EditCommand`, so a
+    /// caller that needs to special-case a command (the assistant's tool attaching a real image
+    /// for `query.renderCanvas`) decodes and reports errors exactly as `runJSON` does.
+    static func decode(command name: String, argumentsJSON: String) -> Result<EditCommand, EditCommandError> {
+        let arguments = argumentsJSON.trimmingCharacters(in: .whitespacesAndNewlines)
+        let commandJSON = "{\"command\":\(jsonString(name)),\"arguments\":\(arguments.isEmpty ? "{}" : arguments)}"
+        do {
+            return .success(try JSONDecoder().decode(EditCommand.self, from: Data(commandJSON.utf8)))
+        } catch let error as EditCommandError {
+            return .failure(error)
+        } catch {
+            return .failure(.invalidArguments(command: name, reason: "they did not decode: \(error.localizedDescription)"))
+        }
+    }
+
+    /// The `{"ok": false, ...}` envelope for `error`, JSON-escaped properly.
+    static func failureJSON(_ error: EditCommandError) -> String {
+        encode(ToolResultEnvelope(ok: false, errorCode: error.code, errorMessage: error.message, errorHint: error.hint))
     }
 
     private static func jsonString(_ value: String) -> String {
