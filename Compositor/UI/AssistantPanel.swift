@@ -20,6 +20,7 @@ struct AssistantPanel: View {
                         }
                         if let proposal = assistant.proposal, !assistant.isResponding {
                             ProposalCard(proposal: proposal,
+                                         rename: { assistant.setProposedName($1, for: $0) },
                                          apply: { Task { await assistant.applyProposal() } },
                                          discard: { assistant.discardProposal() })
                                 .id(proposal.id)
@@ -75,19 +76,39 @@ struct AssistantPanel: View {
     }
 }
 
-/// The edits the model proposed, each as one line, with 적용 / 취소. Deletions are marked.
+/// The edits the model proposed, each as one line, with 적용 / 취소. Deletions are marked. An edit
+/// that names a layer (add, rename) gets a field to correct the name, since the on-device model
+/// often translates or garbles Korean names (CLAUDE.md 2.14).
 private struct ProposalCard: View {
     let proposal: AssistantProposal
+    /// Replaces the name an edit creates; false if the name isn't valid.
+    let rename: (UUID, String) -> Bool
     let apply: () -> Void
     let discard: () -> Void
+    /// Names being typed, by edit id; committed on Return and before applying.
+    @State private var drafts: [UUID: String] = [:]
+    @State private var rejected: Set<UUID> = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("제안된 편집 \(proposal.edits.count)건").font(.caption).foregroundStyle(.secondary)
             ForEach(proposal.edits) { edit in
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 4) {
                     Label(edit.summary, systemImage: edit.isDestructive ? "trash" : "pencil")
                         .foregroundStyle(edit.isDestructive ? Color.red : Color.primary)
+                    if let name = edit.command.createdLayerName {
+                        HStack(spacing: 6) {
+                            Text("이름").font(.caption).foregroundStyle(.secondary)
+                            TextField("이름", text: Binding(get: { drafts[edit.id] ?? name },
+                                                           set: { drafts[edit.id] = $0; rejected.remove(edit.id) }))
+                                .textFieldStyle(.roundedBorder)
+                                .controlSize(.small)
+                                .onSubmit { commit(edit.id) }
+                        }
+                        if rejected.contains(edit.id) {
+                            Text("이 이름은 쓸 수 없습니다.").font(.caption).foregroundStyle(.red)
+                        }
+                    }
                     if let warning = edit.warning {
                         Label(warning, systemImage: "exclamationmark.triangle")
                             .font(.caption).foregroundStyle(.orange)
@@ -97,12 +118,28 @@ private struct ProposalCard: View {
             HStack {
                 Spacer()
                 Button("취소", action: discard)
-                Button("적용", action: apply).buttonStyle(.borderedProminent)
+                Button("적용") {
+                    // A name typed but not yet committed with Return is what the person sees, so
+                    // it is what runs — or nothing does.
+                    for id in drafts.keys { commit(id) }
+                    if rejected.isEmpty { apply() }
+                }
+                .buttonStyle(.borderedProminent)
             }
         }
         .padding(10)
         .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.accentColor.opacity(0.3)))
+    }
+
+    private func commit(_ id: UUID) {
+        guard let draft = drafts[id] else { return }
+        let current = proposal.edits.first { $0.id == id }?.command.createdLayerName
+        if draft == current || rename(id, draft) {
+            drafts[id] = nil
+        } else {
+            rejected.insert(id)
+        }
     }
 }
 

@@ -4,7 +4,9 @@ import Foundation
 /// `command` is pinned: an `.active` or `.index` reference is replaced by the id it resolved to,
 /// so what runs is exactly what the approval card described, whatever is active by then.
 struct ProposedEdit: Identifiable, Equatable, Sendable {
-    let id = UUID()
+    /// Kept across re-validation (`renamingProposedLayer`), so the card's rows — and a name field
+    /// being typed in — keep their identity.
+    var id = UUID()
     let command: EditCommand
     /// What the approval card shows, in the panel's language.
     let summary: String
@@ -60,6 +62,15 @@ extension EditCommand {
     }
 
     static func trimmed(_ name: String) -> String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    /// The same add or rename, creating `name` instead.
+    func creatingName(_ name: String) -> EditCommand {
+        switch self {
+        case .layerAdd: return .layerAdd(LayerAdd(name: name))
+        case .layerRename(var a): a.name = name; return .layerRename(a)
+        default: return self
+        }
+    }
 
     /// Setters that leave one value on one layer: a later one in the same proposal supersedes an
     /// earlier one, so a model correcting itself doesn't leave both on the approval card.
@@ -188,6 +199,41 @@ extension EditCommandRunner {
         case .queryDescribeDocument, .queryDescribeLayer, .queryRenderCanvas, .queryGetHistory, .queryGetCapabilities:
             return .failure(.invalidArguments(command: command.name, reason: "it does not change the document"))
         }
+    }
+
+    /// The person correcting, on the approval card, the name an add or rename will create — the
+    /// fix for Korean names the model translated or garbled (CLAUDE.md 2.14). Later edits that
+    /// refer to the old name follow it, and the whole proposal is checked again with `propose`,
+    /// so the result is exactly as valid as if the model had written it. The corrected edit loses
+    /// its warning (the person chose the name); ids are kept.
+    func renamingProposedLayer(in edits: [ProposedEdit], editID: UUID, to name: String) -> Result<[ProposedEdit], EditCommandError> {
+        guard let index = edits.firstIndex(where: { $0.id == editID }),
+              let old = edits[index].command.createdLayerName else {
+            return .failure(.invalidArguments(command: "rename", reason: "that edit doesn't name a layer"))
+        }
+        let new = EditCommand.trimmed(name)
+        guard !new.isEmpty else { return .failure(.invalidArguments(command: edits[index].command.name, reason: "name is empty")) }
+
+        var commands = edits.map(\.command)
+        commands[index] = commands[index].creatingName(new)
+        for later in commands.indices where later > index && commands[later].layerRef == .name(old) {
+            commands[later] = commands[later].targeting(.name(new))
+        }
+
+        var rebuilt: [ProposedEdit] = []
+        var pending: Set<String> = []
+        for (position, command) in commands.enumerated() {
+            switch propose(command, pendingNames: pending) {
+            case .success(var edit):
+                edit.id = edits[position].id
+                edit.warning = position == index ? nil : edits[position].warning
+                rebuilt.append(edit)
+                if let created = command.createdLayerName { pending.insert(created) }
+            case .failure(let error):
+                return .failure(error)
+            }
+        }
+        return .success(rebuilt)
     }
 
     /// Runs approved edits as one undo step named "AI: `label`" — the outer `beginEdit` folds every

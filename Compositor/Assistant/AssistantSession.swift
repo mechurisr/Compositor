@@ -14,7 +14,8 @@ struct AssistantMessage: Identifiable {
 /// Edits the model proposed in one turn, waiting for the person to press Apply or Discard.
 struct AssistantProposal: Identifiable, Equatable {
     let id = UUID()
-    let edits: [ProposedEdit]
+    /// `var` so a name fixed on the card replaces the edits without making a new proposal.
+    var edits: [ProposedEdit]
     /// The document revision the model planned against. If the person edits the document before
     /// approving, the plan may no longer fit, so it isn't applied (CLAUDE.md 2.8).
     let baseRevision: UUID
@@ -222,6 +223,19 @@ final class AssistantSession {
             messages.append(AssistantMessage(role: .assistant, text: "적용하지 못했습니다: \(error.message)"))
             proposalOutcomeNote = "(Your last proposal could not be applied: \(error.message) Nothing was changed.)"
         }
+    }
+
+    /// The card's name field: replaces the name an add or rename in the waiting proposal will
+    /// create. Returns false (leaving the proposal as it was) if the result wouldn't be valid.
+    @discardableResult
+    func setProposedName(_ name: String, for editID: UUID) -> Bool {
+        guard var proposal else { return false }
+        guard case .success(let edits) = runner.renamingProposedLayer(in: proposal.edits, editID: editID, to: name) else {
+            return false
+        }
+        proposal.edits = edits
+        self.proposal = proposal
+        return true
     }
 
     func discardProposal() {

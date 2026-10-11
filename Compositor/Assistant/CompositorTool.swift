@@ -58,11 +58,11 @@ struct CompositorToolBackend: Sendable {
     private func propose(_ command: EditCommand) -> String {
         switch runner.propose(command, pendingNames: proposals.pendingNames) {
         case .success(var edit):
-            // Still proposed — the person decides — but flagged on the card. The model is told too,
-            // though in measurement it never called again to correct itself (0 of 6); a quoted name
-            // came through intact every time, hence the card's advice.
+            // Still proposed — the person decides, and can fix the name in the card's field — but
+            // flagged. The model is told too, though in measurement it never called again to
+            // correct itself (0 of 6).
             if let name = proposals.unrequestedName(in: command) {
-                edit.warning = "요청에 없던 이름입니다: '\(name)'. 이름을 따옴표로 감싸서 다시 요청해 보세요."
+                edit.warning = "요청에 없던 이름입니다: '\(name)'. 이름 칸에서 고친 뒤 적용하세요."
                 proposals.append(edit)
                 return "{\"ok\":true,\"status\":\"proposed\",\"warning\":\"The name '\(name)' does not appear in the "
                     + "person's message. If they asked for a different name, call editLayer again now with the name "

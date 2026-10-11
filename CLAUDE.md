@@ -472,17 +472,17 @@ Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실기기�
 3. **`show`/`hide`를 별도 action으로**: 범용 이름일 때 "숨겨줘"에 `layer.delete`를 제안한 적이 있다. 분리 후 6/6.
 4. **모델용 `describeLayer` 제거**: 레이어 이름 없이 불러 "not found"를 받고 "레이어가 없다"고 결론 내렸다. `describeDocument`가 모든 레이어를 담는다.
 5. **모델은 도구 에러를 받으면 재시도하지 않는다** — 거의 항상 포기하고 답한다. 에러 문구를 잘 쓰는 것보다 처음부터 맞게 부르게 하는 게 중요. `LayerRef`가 문자열(이름/UUID)·정수(인덱스) 축약형도 받는 이유.
-6. **조사 붙은 한국어 이름은 번역·변형된다**: "배경으로" → "Background"/"背景", "하늘로" → "hallo"/"hail"/"himmel"(0/6). 따옴표로 감싼 '인물'은 3/3 정확. 지시문("번역하지 말 것")으로 안 고쳐짐. → 이름이 사용자 메시지에 없으면 승인 카드에 경고("따옴표로 감싸서 다시 요청")를 단다(`ProposalCollector.unrequestedName`, 6/6 탐지). 모델에게도 알리지만 재호출은 0/6.
+6. **조사 붙은 한국어 이름은 번역·변형된다**: "배경으로" → "Background"/"背景", "하늘로" → "hallo"/"hail"/"himmel"(0/6). 따옴표로 감싼 '인물'은 3/3 정확. 지시문("번역하지 말 것")으로 안 고쳐짐. → 이름이 사용자 메시지에 없으면 승인 카드에 경고를 단다(`ProposalCollector.unrequestedName`, 6/6 탐지). 모델에게도 알리지만 재호출은 0/6. **실질적 해결은 카드의 이름 칸**: add/rename 항목에 이름 입력칸이 있고, 고치면 `EditCommandRunner.renamingProposedLayer`가 같은 제안 안에서 옛 이름을 가리키던 뒤의 편집까지 새 이름으로 바꾼 뒤 제안 전체를 `propose`로 다시 검증한다(id 유지, 고친 항목의 경고 제거). 입력 중인 값은 적용 버튼을 누를 때 먼저 반영되고, 유효하지 않으면 적용하지 않는다.
 
 측정 결과 요약: 불투명도 3/3, 숨기기 3/3, 블렌드 3/3, 추가 3/3, 이름 변경(따옴표) 3/3·(조사) 0/6 — 단 오답은 전부 카드에서 경고.
 
 ### 테스트
 
-`EditCommandEditTests`(15개, 모델 불필요): 검증·고정, 폴더 블렌드 거부, 배치 = undo 1단계 + 완전 복원, 이름으로 연쇄 참조, 실패 시 롤백, 게이팅(불투명도 드래그·busy), 라이브 마스크 소스 삭제 거부, `runJSON` 우회 차단, 도구가 실행 대신 제안, 대체(supersede), 이름 경고, 퍼센트 해석, `LayerRef` 축약형. `AssistantSessionTests`에 실모델 2개 추가(제안 → 승인 → undo 1단계, 사람이 편집하면 적용 거부). 전체 스위트 496개 중 495개 통과 — 실패 1개는 `SliderSnapTests`(SwiftUI `Slider` 안에서 `NSSlider`를 못 찾음, 어시스턴트와 무관).
+`EditCommandEditTests`(17개, 모델 불필요): 검증·고정, 폴더 블렌드 거부, 배치 = undo 1단계 + 완전 복원, 이름으로 연쇄 참조, 실패 시 롤백, 게이팅(불투명도 드래그·busy), 라이브 마스크 소스 삭제 거부, `runJSON` 우회 차단, 도구가 실행 대신 제안, 대체(supersede), 이름 경고, 카드에서 이름 교정, 퍼센트 해석, `LayerRef` 축약형. `AssistantSessionTests`에 실모델 2개 추가(제안 → 승인 → undo 1단계, 사람이 편집하면 적용 거부). 전체 스위트 496개 중 495개 통과 — 실패 1개는 `SliderSnapTests`(SwiftUI `Slider` 안에서 `NSSlider`를 못 찾음, 어시스턴트와 무관).
 
 ### 2단계 남은 일
 
 - `selection.*`, `mask.*`, `adjustment.*` 패밀리.
-- 승인 카드에서 경고 달린 이름을 바로 고칠 수 있게(인라인 편집) — 조사 붙은 한국어 이름 문제의 실질적 해결책.
+- ~~승인 카드에서 이름을 바로 고칠 수 있게~~ → 완료(2026-10-11). 테스트: `correctingANameOnTheCardCarriesThroughTheProposal`, `aNameCorrectionThatWouldBeInvalidIsRefused`.
 - 도구 enum이 커질수록 정확도가 변할 수 있으니 패밀리를 추가할 때마다 위 측정을 다시 할 것.
 

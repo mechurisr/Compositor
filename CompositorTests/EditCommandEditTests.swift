@@ -180,6 +180,46 @@ struct EditCommandEditTests {
         #expect(proposals.edits.last?.warning == nil)
     }
 
+    /// Fixing a translated name on the card: the warning goes, later edits that used the old name
+    /// follow it, ids stay, and the result applies.
+    @Test func correctingANameOnTheCardCarriesThroughTheProposal() async throws {
+        let (session, runner, _) = sessionWithLayer()
+        let collector = ProposalCollector()
+        var add = try runner.propose(decode("layer.add", "{\"name\":\"Sky\"}")).get()
+        add.warning = "flagged"
+        collector.append(add)
+        collector.append(try runner.propose(decode("layer.setOpacity", "{\"layer\":\"Sky\",\"opacity\":0.5}"),
+                                            pendingNames: collector.pendingNames).get())
+
+        let fixed = try runner.renamingProposedLayer(in: collector.edits, editID: add.id, to: " 하늘 ").get()
+        #expect(fixed.map(\.id) == collector.edits.map(\.id))
+        #expect(fixed[0].command == .layerAdd(LayerAdd(name: "하늘")))
+        #expect(fixed[0].warning == nil)
+        #expect(fixed[0].summary == "새 레이어 '하늘' 추가")
+        #expect(fixed[1].command == .layerSetOpacity(LayerSetOpacity(layer: .name("하늘"), opacity: 0.5)))
+        #expect(fixed[1].summary == "'하늘' 불투명도 50%")
+
+        _ = try await runner.applyBatch(fixed.map(\.command), label: "fix").get()
+        #expect(session.document?.layers.first { $0.name == "하늘" }?.opacity == 0.5)
+    }
+
+    @Test func aNameCorrectionThatWouldBeInvalidIsRefused() throws {
+        let (_, runner, _) = sessionWithLayer()
+        let rename = try runner.propose(decode("layer.rename", "{\"layer\":\"Layer 1\",\"name\":\"Background\"}")).get()
+        let opacity = try runner.propose(decode("layer.setOpacity", "{\"layer\":\"Layer 1\",\"opacity\":0.5}")).get()
+        let edits = [rename, opacity]
+
+        if case .failure(let error) = runner.renamingProposedLayer(in: edits, editID: rename.id, to: "  ") {
+            #expect(error.code == "invalid_arguments")
+        } else { Issue.record("expected an empty name to be refused") }
+        // Only edits that name a layer can be renamed.
+        if case .success = runner.renamingProposedLayer(in: edits, editID: opacity.id, to: "x") {
+            Issue.record("expected a non-naming edit to be refused")
+        }
+        let fixed = try runner.renamingProposedLayer(in: edits, editID: rename.id, to: "배경").get()
+        #expect(fixed[0].summary == "'Layer 1' 이름을 '배경'(으)로 변경")
+    }
+
     /// The tool takes opacity in percent; the document stores 0–1.
     @Test func toolOpacityIsReadAsPercent() {
         #expect(EditLayerTool.opacity(from: "50") == 0.5)
