@@ -2,8 +2,8 @@ import FoundationModels
 import Foundation
 import CoreGraphics
 
-/// The two tools the assistant's model calls: `InspectDocumentTool` reads, `EditLayerTool` proposes
-/// edits. Both take typed `@Generable` arguments rather than a JSON string. Measured on the
+/// The tools the assistant's model calls: `InspectDocumentTool` reads; `EditLayerTool` and
+/// `EditSelectionTool` propose edits, one tool per command family. All take typed `@Generable` arguments rather than a JSON string. Measured on the
 /// on-device model: with one generic tool taking `command` + `argumentsJSON`, it got a Korean edit
 /// request into a valid proposal only 3 times in 10 — the nested JSON string came back cut off at
 /// "{", and it invented command names like "query.layer.setOpacity". Guided generation fills typed
@@ -11,8 +11,8 @@ import CoreGraphics
 ///
 /// The typed arguments are turned back into the `EditCommand` wire format and go through
 /// `CompositorToolBackend`, so decoding, validation, and errors still have exactly one path
-/// (`EditCommandRunner.decode`). Two tools, not one per command, keeps within Apple's three-to-five
-/// tools guidance as command families are added (CLAUDE.md 2.4).
+/// (`EditCommandRunner.decode`). A tool per family, not per command, keeps within Apple's
+/// three-to-five tools guidance as families are added (CLAUDE.md 2.4).
 struct CompositorToolBackend: Sendable {
     let runner: EditCommandRunner
     let mailbox: CanvasImageMailbox
@@ -56,7 +56,7 @@ struct CompositorToolBackend: Sendable {
     /// `AssistantSession` shows them for approval once the turn ends (CLAUDE.md 2.8).
     @MainActor
     private func propose(_ command: EditCommand) -> String {
-        switch runner.propose(command, pendingNames: proposals.pendingNames) {
+        switch runner.propose(command, pendingNames: proposals.pendingNames, selectionPending: proposals.selectionPending) {
         case .success(var edit):
             // Still proposed — the person decides, and can fix the name in the card's field — but
             // flagged. The model is told too, though in measurement it never called again to
@@ -76,6 +76,10 @@ struct CompositorToolBackend: Sendable {
             return EditCommandRunner.failureJSON(error)
         }
     }
+
+    /// For tools that turn a described region into coordinates themselves.
+    @MainActor
+    func canvasSize() -> CGSize? { runner.session.document?.size }
 
     static var modelCanSee: Bool {
         if #available(macOS 27.0, *) { return SystemLanguageModel.default.capabilities.contains(.vision) }
@@ -177,6 +181,95 @@ struct EditLayerTool: Tool {
     }
 }
 
+struct EditSelectionTool: Tool {
+    let backend: CompositorToolBackend
+
+    let name = "editSelection"
+    let description = "Proposes a change to the selection. Nothing changes until the person presses Apply."
+
+    /// Adding is an action of its own rather than a `mode` field, and subtracting isn't offered.
+    /// Measured: with an optional mode the model set "subtract" on plain "select the bottom half"
+    /// requests (2 of 15); with a subtractRectangle action it still chose it for "아래쪽 절반"
+    /// (bottom half) 2 of 3 times. Subtracting is rare and gets the opposite of what was asked, so
+    /// the runner supports it (`selection.rect` mode "subtract") but the model isn't given it.
+    @Generable
+    enum Action: String, CaseIterable {
+        case selectAll, deselect, invert
+        case rectangle, ellipse, addRectangle, addEllipse
+        case expand, contract, feather
+    }
+
+    /// Where a rectangle or ellipse goes, worked out here from the canvas size. Measured: asked for
+    /// "a 100×100 square in the middle" of a 400×200 canvas, the model placed it at (100, 100),
+    /// (200, 100), and (50, 100) — never the center (150, 50) — and for "the left half" it often
+    /// left the width out. Naming the region and doing the arithmetic in code avoids both.
+    @Generable
+    enum Region: String, CaseIterable {
+        case topHalf, bottomHalf, leftHalf, rightHalf, center, custom
+    }
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "rectangle: a box shape. ellipse: an oval or circle shape. Plain rectangle/ellipse replace the selection; addRectangle/addEllipse keep it and add the shape.")
+        var action: Action
+        @Guide(description: "For a shape: topHalf (upper half), bottomHalf (lower half), leftHalf, rightHalf; center with width and height; or custom with x, y, width, height.")
+        var region: Region?
+        @Guide(description: "custom: left edge in document pixels from the top-left corner.")
+        var x: Double?
+        @Guide(description: "custom: top edge, pixels down from the top.")
+        var y: Double?
+        @Guide(description: "custom or center: width in pixels.")
+        var width: Double?
+        @Guide(description: "custom or center: height in pixels.")
+        var height: Double?
+        @Guide(description: "expand/contract/feather only: pixels.")
+        var amount: Int?
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        var json: [String: Any] = [:]
+        let command: String
+        switch arguments.action {
+        case .selectAll: command = "selection.all"
+        case .deselect: command = "selection.deselect"
+        case .invert: command = "selection.invert"
+        case .rectangle, .ellipse, .addRectangle, .addEllipse:
+            let ellipse = [.ellipse, .addEllipse].contains(arguments.action)
+            command = ellipse ? "selection.ellipse" : "selection.rect"
+            let frame = Self.frame(for: arguments, canvas: await backend.canvasSize())
+            json["x"] = frame.x; json["y"] = frame.y
+            json["width"] = frame.width; json["height"] = frame.height
+            json["mode"] = [.addRectangle, .addEllipse].contains(arguments.action) ? "add" : "replace"
+        case .expand: command = "selection.expand"; json["amount"] = arguments.amount
+        case .contract: command = "selection.contract"; json["amount"] = arguments.amount
+        case .feather: command = "selection.feather"; json["amount"] = arguments.amount
+        }
+        return await backend.handle(command: command, arguments: json.compactMapValues { $0 })
+    }
+
+    /// The shape's frame. Missing values stay missing, so the runner reports them rather than a
+    /// guess being proposed; with no canvas, only custom coordinates can be used.
+    static func frame(for arguments: Arguments, canvas: CGSize?) -> (x: Double?, y: Double?, width: Double?, height: Double?) {
+        let region = arguments.region ?? (arguments.x == nil && arguments.y == nil && arguments.width != nil ? .center : .custom)
+        guard region != .custom, let canvas else { return (arguments.x, arguments.y, arguments.width, arguments.height) }
+        let w = Double(canvas.width), h = Double(canvas.height)
+        switch region {
+        case .leftHalf: return (0, 0, w / 2, h)
+        case .rightHalf: return (w / 2, 0, w / 2, h)
+        case .topHalf: return (0, 0, w, h / 2)
+        case .bottomHalf: return (0, h / 2, w, h / 2)
+        case .center:
+            // One side given means a square: asked for "100x100 in the middle", the model often
+            // sent the width alone. The card shows the size, so a wrong guess is visible.
+            guard let width = arguments.width ?? arguments.height, let height = arguments.height ?? arguments.width else {
+                return (nil, nil, nil, nil)
+            }
+            return ((w - width) / 2, (h - height) / 2, width, height)
+        case .custom: return (arguments.x, arguments.y, arguments.width, arguments.height)
+        }
+    }
+}
+
 /// Carries a rendered canvas from the tools to `AssistantSession`. Images in a tool's output never
 /// reach the on-device model — measured: with a solid blue/green/yellow canvas returned as an
 /// `Attachment` from the tool, it answered "red" every time, while the same image attached
@@ -204,6 +297,8 @@ final class ProposalCollector {
 
     /// Names layers will have once the queued edits run, so a later edit can target them by name.
     var pendingNames: Set<String> { Set(edits.compactMap(\.command.createdLayerName)) }
+    /// Whether a queued edit leaves a selection, for Expand / Contract / Feather / Inverse after it.
+    var selectionPending: Bool { edits.contains { $0.command.createsSelection } }
 
     /// Queues `edit`, replacing an earlier edit that sets the same value on the same layer.
     func append(_ edit: ProposedEdit) {

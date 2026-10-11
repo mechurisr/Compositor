@@ -387,7 +387,7 @@ struct EditBatch: Codable { let label: String; let commands: [EditCommand]; var 
 | 단계 | 범위 | 상태 |
 |---|---|---|
 | 1 | `query.*` 전용(변경 없음) + 카탈로그 + 패널. digest와 프롬프트의 타당성을 먼저 증명한다. | **구현됨 — 2.13** |
-| 2 | `layer.*`, `selection.*`, `mask.*`, `adjustment.*` + 원자적 배치 + 승인 UI. | **2a 구현됨**(`layer.*` + 배치 + 승인 UI) — 2.14. `selection.*`/`mask.*`/`adjustment.*`는 계획만 |
+| 2 | `layer.*`, `selection.*`, `mask.*`, `adjustment.*` + 원자적 배치 + 승인 UI. | **2a·2b 구현됨**(`layer.*`, `selection.*` + 배치 + 승인 UI) — 2.14. `mask.*`/`adjustment.*`는 계획만 |
 | 3 | `filter.*`(비동기 모달 구동), `effects.*`, `transform.*`. | 계획만 |
 | 4 | `pixels.*`, 브러시, 내보내기. | 계획만 |
 
@@ -480,9 +480,20 @@ Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실기기�
 
 `EditCommandEditTests`(17개, 모델 불필요): 검증·고정, 폴더 블렌드 거부, 배치 = undo 1단계 + 완전 복원, 이름으로 연쇄 참조, 실패 시 롤백, 게이팅(불투명도 드래그·busy), 라이브 마스크 소스 삭제 거부, `runJSON` 우회 차단, 도구가 실행 대신 제안, 대체(supersede), 이름 경고, 카드에서 이름 교정, 퍼센트 해석, `LayerRef` 축약형. `AssistantSessionTests`에 실모델 2개 추가(제안 → 승인 → undo 1단계, 사람이 편집하면 적용 거부). 전체 스위트 496개 중 495개 통과 — 실패 1개는 `SliderSnapTests`(SwiftUI `Slider` 안에서 `NSSlider`를 못 찾음, 어시스턴트와 무관).
 
+### Stage 2b — `selection.*` (2026-10-11)
+
+- **명령**: `selection.all` / `deselect` / `invert` / `rect` / `ellipse`(x, y, width, height + mode replace·add·subtract) / `expand` / `contract`(1–500px) / `feather`(1–250px). 전부 Select 메뉴의 세션 메서드(`selectAll`, `applySelection`, `expandSelection` …)를 그대로 호출 — 캔버스 클리핑·안티앨리어싱·페더 누적이 사람과 같다. 선택 영역은 문서 안에 있으므로 undo 대상이고 배치 한 단계에 들어간다.
+- **검증**: 캔버스와 전혀 겹치지 않는 도형은 거부 — 클리핑되면 **명시적 빈 선택**이 되어 이후 편집이 "아무것도 안 건드림"이 된다(1.3). invert/expand/contract/feather는 현재 선택이 있거나 같은 제안 안에 앞서 선택을 만든 편집이 있어야 한다(`EditCommand.needsSelection`/`createsSelection`, `propose(selectionPending:)`). 게이팅에 `lassoDraft`(올가미·마키를 그리는 중) 추가.
+- **도구 `editSelection`** — 측정으로 정해진 형태(한국어 요청, 400×200 캔버스):
+  1. **좌표는 앱이 계산한다**: 모델은 "가운데 100×100"을 (100,100)/(200,100)/(50,100)에 놓았다(0/3). `region` enum(topHalf/bottomHalf/leftHalf/rightHalf/center/custom)을 두고 도구가 캔버스 크기로 계산 → 4/4. center에 한 변만 오면 정사각형(모델이 height를 자주 빠뜨림).
+  2. **옵셔널 `mode` 칸 폐기, 빼기는 모델에게 주지 않는다**: 옵셔널 mode가 있으면 그냥 "선택해줘"에도 subtract를 채웠고(2/15), `subtractRectangle` 동작을 주면 "아래쪽 절반"에 그걸 골랐다(2/3). 빼기는 드물고 반대 결과를 내므로 실행기만 지원. 추가는 `addRectangle`/`addEllipse` 동작으로.
+  3. **enum 순서·설명이 결과를 흔든다**: `leftHalf`가 첫 항목일 때 "위쪽 절반"에 3/3 `leftHalf`. "ellipse = oval or circle"만 쓰면 "사각형 추가"가 3/3 타원으로. 사각형·타원을 균형 있게 설명하자 최종 18/20. **3회 표본은 변동이 크다 — 문구를 바꾸면 반드시 다시 잴 것.**
+- **최종 측정**: 전체 선택 2/3·해제 2/3(실패는 무응답)·반전 3/3·왼/아래/위(타원) 절반 3/3–4/4·가운데 4/4·확장 3/3·페더 3/3·원 추가 4/4, **사각형 추가 2/4**(나머지는 타원으로 — 카드에 "타원 선택에 추가"로 보임). 레이어 회귀 3/3.
+- **테스트** `SelectionCommandTests`(6개): 캔버스 밖·크기 0 거부, 선택 필요 조건(앞선 제안 포함), 배치 = undo 1단계 + 복원, 추가 결합·중복 해제, 영역 → 좌표 계산, 도구가 빼기를 내지 않음.
+
 ### 2단계 남은 일
 
-- `selection.*`, `mask.*`, `adjustment.*` 패밀리.
+- `mask.*`, `adjustment.*` 패밀리. (`selection.*`는 2b로 완료. Select Subject(`ObjectSelection`, 비동기 ML)는 아직.)
 - ~~승인 카드에서 이름을 바로 고칠 수 있게~~ → 완료(2026-10-11). 테스트: `correctingANameOnTheCardCarriesThroughTheProposal`, `aNameCorrectionThatWouldBeInvalidIsRefused`.
 - 도구 enum이 커질수록 정확도가 변할 수 있으니 패밀리를 추가할 때마다 위 측정을 다시 할 것.
 

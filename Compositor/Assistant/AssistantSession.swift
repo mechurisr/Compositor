@@ -92,7 +92,8 @@ final class AssistantSession {
 
     private func makeSession() -> LanguageModelSession {
         let backend = CompositorToolBackend(runner: runner, mailbox: canvasMailbox, proposals: proposals)
-        return LanguageModelSession(tools: [InspectDocumentTool(backend: backend), EditLayerTool(backend: backend)],
+        return LanguageModelSession(tools: [InspectDocumentTool(backend: backend), EditLayerTool(backend: backend),
+                                            EditSelectionTool(backend: backend)],
                                     instructions: Self.instructions())
     }
 
@@ -111,7 +112,9 @@ final class AssistantSession {
         alpha (maskSourceID) or by an ancestor folder's mask. Folders are pass-through: a folder's \
         opacity and mask apply to each descendant individually, not to a flattened group.
 
-        To change a layer, call the editLayer tool — once per change. Changes do not happen \
+        To change a layer, call the editLayer tool; to change the selection, call the \
+        editSelection tool — for halves of the canvas or a centered shape, choose the region \
+        instead of working out coordinates. Call a tool once per change. Changes do not happen \
         right away: each one is queued as a proposal the person approves with an Apply button. \
         After add or rename, refer to that layer by its new name. Write layer names exactly as \
         the person typed them, in their language — never translate a name. Once you have \

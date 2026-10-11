@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// A mutating command checked against the live document and waiting for the person's approval.
 /// `command` is pinned: an `.active` or `.index` reference is replaced by the id it resolved to,
@@ -36,6 +37,14 @@ extension EditCommand {
         case .layerSetOpacity: "layer.setOpacity"
         case .layerSetBlendMode: "layer.setBlendMode"
         case .layerDelete: "layer.delete"
+        case .selectionAll: "selection.all"
+        case .selectionDeselect: "selection.deselect"
+        case .selectionInvert: "selection.invert"
+        case .selectionRect: "selection.rect"
+        case .selectionEllipse: "selection.ellipse"
+        case .selectionExpand: "selection.expand"
+        case .selectionContract: "selection.contract"
+        case .selectionFeather: "selection.feather"
         }
     }
 
@@ -48,7 +57,7 @@ extension EditCommand {
         case .layerSetOpacity(var a): a.layer = ref; return .layerSetOpacity(a)
         case .layerSetBlendMode(var a): a.layer = ref; return .layerSetBlendMode(a)
         case .layerDelete(var a): a.layer = ref; return .layerDelete(a)
-        case .queryDescribeDocument, .queryRenderCanvas, .queryGetHistory, .queryGetCapabilities, .layerAdd: return self
+        default: return self
         }
     }
 
@@ -88,7 +97,8 @@ extension EditCommand {
 extension EditorSession {
     /// Why layer edits can't start right now, phrased for the model and the panel — or nil when they
     /// can. Mirrors `canEditLayers` condition for condition (keep the two in step), plus an open
-    /// opacity drag: `setLayerOpacity` writes to the layer being dragged, not the active one.
+    /// opacity drag: `setLayerOpacity` writes to the layer being dragged, not the active one — and
+    /// a lasso or marquee being drawn, which the selection commands' `canModifySelection` waits for.
     var layerEditBlocker: String? {
         if document == nil { return "no document is open" }
         if isProjectBusy { return "the app is busy with another operation" }
@@ -106,6 +116,7 @@ extension EditorSession {
         if adjustmentEditingID != nil { return "an adjustment layer is being edited" }
         if selectionAmountOperation != nil { return "a selection amount prompt is open" }
         if renamingLayerID != nil { return "a layer is being renamed" }
+        if lassoDraft != nil { return "a selection is being drawn" }
         if showsNewDocument { return "the New Document sheet is open" }
         if showsImporter { return "the import dialog is open" }
         if opacityEditLayerID != nil { return "a layer's opacity is being adjusted" }
@@ -123,8 +134,10 @@ extension EditorSession {
 extension EditCommandRunner {
     /// Checks a mutating command against the current document without running it, and describes
     /// it for the approval card. `pendingNames` are names earlier edits in the same proposal will
-    /// create (`createdLayerName`), so a command may target a layer that doesn't exist yet.
-    func propose(_ command: EditCommand, pendingNames: Set<String> = []) -> Result<ProposedEdit, EditCommandError> {
+    /// create (`createdLayerName`), so a command may target a layer that doesn't exist yet;
+    /// `selectionPending` says an earlier edit leaves a selection (`createsSelection`).
+    func propose(_ command: EditCommand, pendingNames: Set<String> = [],
+                 selectionPending: Bool = false) -> Result<ProposedEdit, EditCommandError> {
         guard command.mutatesDocument else {
             return .failure(.invalidArguments(command: command.name, reason: "it does not change the document, so call it directly"))
         }
@@ -196,8 +209,56 @@ extension EditCommandRunner {
             }
             return .success(ProposedEdit(command: pinned, summary: "\(label) 삭제", isDestructive: true))
 
+        case .selectionAll, .selectionDeselect, .selectionInvert, .selectionRect, .selectionEllipse,
+             .selectionExpand, .selectionContract, .selectionFeather:
+            return proposeSelection(command, canvas: CGRect(origin: .zero, size: document.size),
+                                    hasSelection: (session.selection?.isEmpty == false) || selectionPending)
+                .map { ProposedEdit(command: command, summary: $0, isDestructive: false) }
+
         case .queryDescribeDocument, .queryDescribeLayer, .queryRenderCanvas, .queryGetHistory, .queryGetCapabilities:
             return .failure(.invalidArguments(command: command.name, reason: "it does not change the document"))
+        }
+    }
+
+    /// Selection commands' checks and card summary. A shape must overlap the canvas: clipped to it,
+    /// one entirely outside would leave an explicit *empty* selection, which every later edit treats
+    /// as "touch nothing" (CLAUDE.md 1.3) — almost certainly not what was asked.
+    private func proposeSelection(_ command: EditCommand, canvas: CGRect, hasSelection: Bool) -> Result<String, EditCommandError> {
+        if command.needsSelection, !hasSelection {
+            return .failure(.notSupported("\(command.name) needs a selection; select something first (selection.rect, selection.all, …)."))
+        }
+        switch command {
+        case .selectionAll: return .success("전체 선택")
+        case .selectionDeselect: return .success("선택 해제")
+        case .selectionInvert: return .success("선택 반전")
+        case .selectionRect(let shape), .selectionEllipse(let shape):
+            let rect = shape.rect.standardized
+            guard [shape.x, shape.y, shape.width, shape.height].allSatisfy(\.isFinite), rect.width >= 1, rect.height >= 1 else {
+                return .failure(.invalidArguments(command: command.name, reason: "width and height must be at least 1 pixel"))
+            }
+            guard rect.intersects(canvas) else {
+                return .failure(.invalidArguments(command: command.name,
+                    reason: "the shape lies outside the \(Int(canvas.width))×\(Int(canvas.height)) canvas"))
+            }
+            if shape.mode == .subtract, !hasSelection {
+                return .failure(.notSupported("Subtracting needs a selection to subtract from."))
+            }
+            let kind = if case .selectionEllipse = command { "타원" } else { "사각형" }
+            let mode = switch shape.mode { case .replace: "선택"; case .add: "선택에 추가"; case .subtract: "선택에서 빼기" }
+            return .success("\(kind) \(mode) (\(Int(rect.minX)), \(Int(rect.minY)), \(Int(rect.width))×\(Int(rect.height)))")
+        case .selectionExpand(let a), .selectionContract(let a):
+            guard (1...500).contains(a.amount) else {
+                return .failure(.invalidArguments(command: command.name, reason: "amount must be 1–500 pixels; got \(a.amount)"))
+            }
+            let verb = if case .selectionExpand = command { "확장" } else { "축소" }
+            return .success("선택 영역 \(a.amount)px \(verb)")
+        case .selectionFeather(let a):
+            guard (1...250).contains(a.amount) else {
+                return .failure(.invalidArguments(command: command.name, reason: "amount must be 1–250 pixels; got \(a.amount)"))
+            }
+            return .success("선택 영역 경계 \(a.amount)px 부드럽게")
+        default:
+            return .failure(.invalidArguments(command: command.name, reason: "not a selection command"))
         }
     }
 
@@ -222,8 +283,10 @@ extension EditCommandRunner {
 
         var rebuilt: [ProposedEdit] = []
         var pending: Set<String> = []
+        var selectionPending = false
         for (position, command) in commands.enumerated() {
-            switch propose(command, pendingNames: pending) {
+            defer { selectionPending = selectionPending || command.createsSelection }
+            switch propose(command, pendingNames: pending, selectionPending: selectionPending) {
             case .success(var edit):
                 edit.id = edits[position].id
                 edit.warning = position == index ? nil : edits[position].warning
@@ -323,8 +386,47 @@ extension EditCommandRunner {
                 return .success(())
             }
 
+        case .selectionAll, .selectionDeselect, .selectionInvert, .selectionRect, .selectionEllipse,
+             .selectionExpand, .selectionContract, .selectionFeather:
+            return applySelection(command)
+
         case .queryDescribeDocument, .queryDescribeLayer, .queryRenderCanvas, .queryGetHistory, .queryGetCapabilities:
             return .failure(.invalidArguments(command: command.name, reason: "it does not change the document"))
+        }
+    }
+
+    /// Through the Select menu's own methods (and the marquee's `applySelection`), so the result —
+    /// clipping to the canvas, antialiasing, feather stacking — is what the person would get.
+    private func applySelection(_ command: EditCommand) -> Result<Void, EditCommandError> {
+        if command.needsSelection, session.selection?.isEmpty != false {
+            return .failure(.notSupported("\(command.name) needs a selection, and there is none."))
+        }
+        let before = session.selection
+        switch command {
+        case .selectionAll: session.selectAll()
+        case .selectionDeselect: session.deselect(); return session.selection == nil ? .success(()) : .failure(.notApplied(command.name))
+        case .selectionInvert: session.invertSelection()
+        case .selectionRect(let shape):
+            session.applySelection(CGPath(rect: shape.rect.standardized, transform: nil), mode: Self.mode(shape.mode), name: "Rectangular Marquee")
+        case .selectionEllipse(let shape):
+            session.applySelection(CGPath(ellipseIn: shape.rect.standardized, transform: nil), mode: Self.mode(shape.mode), name: "Elliptical Marquee")
+        case .selectionExpand(let a): session.expandSelection(by: a.amount)
+        case .selectionContract(let a): session.contractSelection(by: a.amount)
+        case .selectionFeather(let a): session.featherSelection(by: a.amount)
+        default: return .failure(.invalidArguments(command: command.name, reason: "not a selection command"))
+        }
+        // Re-selecting what is already selected is fine; otherwise the selection must have changed.
+        guard session.selection != nil, session.selection != before || command.createsSelection else {
+            return .failure(.notApplied(command.name))
+        }
+        return .success(())
+    }
+
+    private static func mode(_ mode: SelectionShape.Mode) -> SelectionMode {
+        switch mode {
+        case .replace: .replace
+        case .add: .add
+        case .subtract: .subtract
         }
     }
 

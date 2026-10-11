@@ -20,7 +20,15 @@ struct EditCommandCatalogTests {
         "layer.setVisibility": "{ \"layer\": { \"active\": true }, \"visible\": false }",
         "layer.setOpacity": "{ \"layer\": { \"active\": true }, \"opacity\": 0.5 }",
         "layer.setBlendMode": "{ \"layer\": { \"active\": true }, \"blendMode\": \"Multiply\" }",
-        "layer.delete": "{ \"layer\": { \"active\": true } }"
+        "layer.delete": "{ \"layer\": { \"active\": true } }",
+        "selection.all": "{}",
+        "selection.deselect": "{}",
+        "selection.invert": "{}",
+        "selection.rect": "{ \"x\": 0, \"y\": 0, \"width\": 10, \"height\": 10 }",
+        "selection.ellipse": "{ \"x\": 0, \"y\": 0, \"width\": 10, \"height\": 10, \"mode\": \"add\" }",
+        "selection.expand": "{ \"amount\": 4 }",
+        "selection.contract": "{ \"amount\": 4 }",
+        "selection.feather": "{ \"amount\": 4 }"
     ]
 
     @Test func catalogListsExactlyTheImplementedCommands() {

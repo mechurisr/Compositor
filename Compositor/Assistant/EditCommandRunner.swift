@@ -67,7 +67,7 @@ final class EditCommandRunner: @unchecked Sendable {
         case .queryGetCapabilities:
             return .success(.capabilities(EditCommandCatalog.commands))
 
-        case .layerAdd, .layerRename, .layerSetVisibility, .layerSetOpacity, .layerSetBlendMode, .layerDelete:
+        default:
             // Edits never run one at a time from here: they are proposed (`propose`) and, once the
             // person approves, run together as one undo step (`applyBatch`).
             return .failure(.notSupported("\(command.name) changes the document, so it must be proposed and approved."))

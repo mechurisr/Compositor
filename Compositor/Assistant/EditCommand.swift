@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 /// Which layer a command means, before it has been resolved to a UUID. The model rarely
 /// knows a layer's id up front, so it names one some other way; the runner resolves this
@@ -134,6 +135,39 @@ struct LayerDelete: Codable, Equatable, Sendable {
     var layer: LayerRef
 }
 
+/// A rectangle or ellipse in document pixels (top-left origin, y down), combined with the current
+/// selection the way the marquee tool does.
+struct SelectionShape: Codable, Equatable, Sendable {
+    enum Mode: String, Codable, Sendable { case replace, add, subtract }
+    var x: Double
+    var y: Double
+    var width: Double
+    var height: Double
+    var mode: Mode = .replace
+
+    private enum CodingKeys: String, CodingKey { case x, y, width, height, mode }
+
+    init(x: Double, y: Double, width: Double, height: Double, mode: Mode = .replace) {
+        self.x = x; self.y = y; self.width = width; self.height = height; self.mode = mode
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        x = try container.decode(Double.self, forKey: .x)
+        y = try container.decode(Double.self, forKey: .y)
+        width = try container.decode(Double.self, forKey: .width)
+        height = try container.decode(Double.self, forKey: .height)
+        mode = try container.decodeIfPresent(Mode.self, forKey: .mode) ?? .replace
+    }
+
+    var rect: CGRect { CGRect(x: x, y: y, width: width, height: height) }
+}
+
+/// Pixels for Expand / Contract / Feather.
+struct SelectionAmount: Codable, Equatable, Sendable {
+    var amount: Int
+}
+
 /// A command the assistant can ask the app to run. Every case is a thin adapter over an
 /// existing `EditorSession` entry point — see CLAUDE.md part 2 for why no case may reimplement
 /// pixel logic, validation, or undo of its own.
@@ -154,14 +188,39 @@ enum EditCommand: Equatable, Sendable {
     case layerSetOpacity(LayerSetOpacity)
     case layerSetBlendMode(LayerSetBlendMode)
     case layerDelete(LayerDelete)
+    case selectionAll
+    case selectionDeselect
+    case selectionInvert
+    case selectionRect(SelectionShape)
+    case selectionEllipse(SelectionShape)
+    case selectionExpand(SelectionAmount)
+    case selectionContract(SelectionAmount)
+    case selectionFeather(SelectionAmount)
 
-    /// Whether running this changes the document — and so must go through approval.
+    /// Whether running this changes the document — and so must go through approval. The
+    /// selection lives in the document (it is undoable), so selection commands count.
     var mutatesDocument: Bool {
         switch self {
         case .queryDescribeDocument, .queryDescribeLayer, .queryRenderCanvas, .queryGetHistory, .queryGetCapabilities:
             false
-        case .layerAdd, .layerRename, .layerSetVisibility, .layerSetOpacity, .layerSetBlendMode, .layerDelete:
+        default:
             true
+        }
+    }
+
+    /// Needs a selection to work on (Select → Modify, Inverse).
+    var needsSelection: Bool {
+        switch self {
+        case .selectionInvert, .selectionExpand, .selectionContract, .selectionFeather: true
+        default: false
+        }
+    }
+
+    /// Leaves a selection behind, so a later `needsSelection` edit in the same proposal has one.
+    var createsSelection: Bool {
+        switch self {
+        case .selectionAll, .selectionRect, .selectionEllipse: true
+        default: false
         }
     }
 
@@ -174,7 +233,7 @@ enum EditCommand: Equatable, Sendable {
         case .layerSetOpacity(let a): a.layer
         case .layerSetBlendMode(let a): a.layer
         case .layerDelete(let a): a.layer
-        case .queryDescribeDocument, .queryRenderCanvas, .queryGetHistory, .queryGetCapabilities, .layerAdd: nil
+        default: nil
         }
     }
 }
@@ -208,6 +267,22 @@ extension EditCommand: Decodable {
             self = .layerSetBlendMode(try container.decode(LayerSetBlendMode.self, forKey: .arguments))
         case "layer.delete":
             self = .layerDelete(try container.decode(LayerDelete.self, forKey: .arguments))
+        case "selection.all":
+            self = .selectionAll
+        case "selection.deselect":
+            self = .selectionDeselect
+        case "selection.invert":
+            self = .selectionInvert
+        case "selection.rect":
+            self = .selectionRect(try container.decode(SelectionShape.self, forKey: .arguments))
+        case "selection.ellipse":
+            self = .selectionEllipse(try container.decode(SelectionShape.self, forKey: .arguments))
+        case "selection.expand":
+            self = .selectionExpand(try container.decode(SelectionAmount.self, forKey: .arguments))
+        case "selection.contract":
+            self = .selectionContract(try container.decode(SelectionAmount.self, forKey: .arguments))
+        case "selection.feather":
+            self = .selectionFeather(try container.decode(SelectionAmount.self, forKey: .arguments))
         default:
             throw EditCommandError.unknownCommand(name)
         }

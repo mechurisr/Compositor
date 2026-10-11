@@ -93,6 +93,62 @@ enum EditCommandCatalog {
             mutatesDocument: true,
             argumentsSketch: "{ layer: LayerRef }",
             preconditions: "`layer` must resolve to one layer that supplies no live mask to other layers. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "selection.all",
+            summary: "Selects the whole canvas.",
+            mutatesDocument: true,
+            argumentsSketch: "{}",
+            preconditions: "A document must be open. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "selection.deselect",
+            summary: "Removes the selection, so edits apply to the whole layer again.",
+            mutatesDocument: true,
+            argumentsSketch: "{}",
+            preconditions: "A document must be open. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "selection.invert",
+            summary: "Selects everything that was not selected.",
+            mutatesDocument: true,
+            argumentsSketch: "{}",
+            preconditions: "Needs a selection (current, or made earlier in the same proposal). Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "selection.rect",
+            summary: "Selects a rectangle in document pixels (top-left origin, y down), replacing, adding to, or subtracting from the selection.",
+            mutatesDocument: true,
+            argumentsSketch: "{ x: Double, y: Double, width: Double, height: Double, mode?: \"replace\" | \"add\" | \"subtract\" = \"replace\" }",
+            preconditions: "At least 1×1 and must overlap the canvas (clipped to it). subtract needs a selection. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "selection.ellipse",
+            summary: "Selects the ellipse inscribed in a rectangle, combined like selection.rect.",
+            mutatesDocument: true,
+            argumentsSketch: "{ x: Double, y: Double, width: Double, height: Double, mode?: \"replace\" | \"add\" | \"subtract\" = \"replace\" }",
+            preconditions: "As selection.rect. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "selection.expand",
+            summary: "Grows the selection outward by a number of pixels, with rounded corners.",
+            mutatesDocument: true,
+            argumentsSketch: "{ amount: Int (1–500) }",
+            preconditions: "Needs a selection. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "selection.contract",
+            summary: "Shrinks the selection inward by a number of pixels.",
+            mutatesDocument: true,
+            argumentsSketch: "{ amount: Int (1–500) }",
+            preconditions: "Needs a selection. Contracting past the middle leaves an explicit empty selection. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "selection.feather",
+            summary: "Softens the selection's edge by a number of pixels; repeating it softens further.",
+            mutatesDocument: true,
+            argumentsSketch: "{ amount: Int (1–250) }",
+            preconditions: "Needs a selection. Proposed for approval."
         )
     ]
 
