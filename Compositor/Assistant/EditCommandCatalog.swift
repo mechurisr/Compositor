@@ -149,6 +149,48 @@ enum EditCommandCatalog {
             mutatesDocument: true,
             argumentsSketch: "{ amount: Int (1–250) }",
             preconditions: "Needs a selection. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "mask.add",
+            summary: "Adds a layer mask that shows everything (reveal: true, white) or hides everything (reveal: false, black).",
+            mutatesDocument: true,
+            argumentsSketch: "{ layer: LayerRef, reveal: Bool }",
+            preconditions: "`layer` must have no mask yet. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "mask.addFromSelection",
+            summary: "Adds a layer mask made from the selection, which is deselected in the same step. shows: \"selection\" keeps only the selected area visible; \"outside\" hides it.",
+            mutatesDocument: true,
+            argumentsSketch: "{ layer: LayerRef, shows: \"selection\" | \"outside\" }",
+            preconditions: "Needs a selection; `layer` must have no mask yet. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "mask.setEnabled",
+            summary: "Turns a layer's mask on or off without deleting it.",
+            mutatesDocument: true,
+            argumentsSketch: "{ layer: LayerRef, enabled: Bool }",
+            preconditions: "`layer` must have a mask. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "mask.delete",
+            summary: "Deletes a layer's mask.",
+            mutatesDocument: true,
+            argumentsSketch: "{ layer: LayerRef }",
+            preconditions: "`layer` must have a mask. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "mask.clipToBelow",
+            summary: "Clips a layer to the layer directly below it (a clipping mask), sharing that layer's base if it is itself clipped.",
+            mutatesDocument: true,
+            argumentsSketch: "{ layer: LayerRef }",
+            preconditions: "`layer` must not be a folder or already clipped, and needs a non-folder layer directly below it in the same folder. Proposed for approval."
+        ),
+        CommandDescriptor(
+            name: "mask.releaseClipping",
+            summary: "Releases a clipping mask; clipped layers above it that share its base are released too.",
+            mutatesDocument: true,
+            argumentsSketch: "{ layer: LayerRef }",
+            preconditions: "`layer` must be clipped. Proposed for approval."
         )
     ]
 

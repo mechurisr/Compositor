@@ -28,7 +28,13 @@ struct EditCommandCatalogTests {
         "selection.ellipse": "{ \"x\": 0, \"y\": 0, \"width\": 10, \"height\": 10, \"mode\": \"add\" }",
         "selection.expand": "{ \"amount\": 4 }",
         "selection.contract": "{ \"amount\": 4 }",
-        "selection.feather": "{ \"amount\": 4 }"
+        "selection.feather": "{ \"amount\": 4 }",
+        "mask.add": "{ \"layer\": \"Layer 1\", \"reveal\": true }",
+        "mask.addFromSelection": "{ \"layer\": \"Layer 1\", \"shows\": \"selection\" }",
+        "mask.setEnabled": "{ \"layer\": \"Layer 1\", \"enabled\": false }",
+        "mask.delete": "{ \"layer\": \"Layer 1\" }",
+        "mask.clipToBelow": "{ \"layer\": \"Layer 1\" }",
+        "mask.releaseClipping": "{ \"layer\": \"Layer 1\" }"
     ]
 
     @Test func catalogListsExactlyTheImplementedCommands() {

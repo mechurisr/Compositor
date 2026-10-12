@@ -2,8 +2,8 @@ import FoundationModels
 import Foundation
 import CoreGraphics
 
-/// The tools the assistant's model calls: `InspectDocumentTool` reads; `EditLayerTool` and
-/// `EditSelectionTool` propose edits, one tool per command family. All take typed `@Generable` arguments rather than a JSON string. Measured on the
+/// The tools the assistant's model calls: `InspectDocumentTool` reads; `EditLayerTool`,
+/// `EditSelectionTool`, and `EditMaskTool` propose edits, one tool per command family. All take typed `@Generable` arguments rather than a JSON string. Measured on the
 /// on-device model: with one generic tool taking `command` + `argumentsJSON`, it got a Korean edit
 /// request into a valid proposal only 3 times in 10 — the nested JSON string came back cut off at
 /// "{", and it invented command names like "query.layer.setOpacity". Guided generation fills typed
@@ -267,6 +267,49 @@ struct EditSelectionTool: Tool {
             return ((w - width) / 2, (h - height) / 2, width, height)
         case .custom: return (arguments.x, arguments.y, arguments.width, arguments.height)
         }
+    }
+}
+
+struct EditMaskTool: Tool {
+    let backend: CompositorToolBackend
+
+    let name = "editMask"
+    let description = "Proposes a layer mask or clipping-mask change. Nothing changes until the person presses Apply."
+
+    /// Named by what ends up visible, not by mask color: this app's own Add Mask with a selection
+    /// *hides* the selection (unlike Photoshop), so "white"/"black" would mislead. And never "hide":
+    /// with an addHideAll action, "Photo 숨겨줘" (hide Photo) got a hide-all mask instead of
+    /// editLayer's hide.
+    @Generable
+    enum Action: String, CaseIterable {
+        case addMaskShowingAll, addMaskShowingNothing, addMaskShowingOnlySelection, addMaskShowingAllButSelection
+        case enableMask, disableMask, deleteMask
+        case clipToLayerBelow, releaseClipping
+    }
+
+    @Generable
+    struct Arguments {
+        @Guide(description: "addMaskShowingAll: white mask. addMaskShowingNothing: black mask, the layer is fully masked out. addMaskShowingOnlySelection / addMaskShowingAllButSelection: built from the selection. disableMask: turn the mask off but keep it. deleteMask: remove the mask entirely. clipToLayerBelow: clipping mask onto the layer below.")
+        var action: Action
+        @Guide(description: "Name of the layer.")
+        var layer: String
+    }
+
+    func call(arguments: Arguments) async throws -> String {
+        var json: [String: Any] = ["layer": arguments.layer]
+        let command: String
+        switch arguments.action {
+        case .addMaskShowingAll: command = "mask.add"; json["reveal"] = true
+        case .addMaskShowingNothing: command = "mask.add"; json["reveal"] = false
+        case .addMaskShowingOnlySelection: command = "mask.addFromSelection"; json["shows"] = "selection"
+        case .addMaskShowingAllButSelection: command = "mask.addFromSelection"; json["shows"] = "outside"
+        case .enableMask: command = "mask.setEnabled"; json["enabled"] = true
+        case .disableMask: command = "mask.setEnabled"; json["enabled"] = false
+        case .deleteMask: command = "mask.delete"
+        case .clipToLayerBelow: command = "mask.clipToBelow"
+        case .releaseClipping: command = "mask.releaseClipping"
+        }
+        return await backend.handle(command: command, arguments: json)
     }
 }
 

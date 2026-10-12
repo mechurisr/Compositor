@@ -168,6 +168,32 @@ struct SelectionAmount: Codable, Equatable, Sendable {
     var amount: Int
 }
 
+/// A plain mask: all white (everything shows) or all black (everything hidden).
+struct MaskAdd: Codable, Equatable, Sendable {
+    var layer: LayerRef
+    var reveal: Bool
+}
+
+/// A mask made from the selection, which it uses up (deselects) in the same step.
+struct MaskFromSelection: Codable, Equatable, Sendable {
+    /// What stays visible: the selected area, or everything outside it. Named by the result rather
+    /// than by mask color, since this app's own default (`addMask(revealing: true)`, the Layers
+    /// panel's button) *hides* the selection — the opposite of Photoshop.
+    enum Shows: String, Codable, Sendable { case selection, outside }
+    var layer: LayerRef
+    var shows: Shows
+}
+
+struct MaskSetEnabled: Codable, Equatable, Sendable {
+    var layer: LayerRef
+    var enabled: Bool
+}
+
+/// The layer a mask command acts on.
+struct MaskTarget: Codable, Equatable, Sendable {
+    var layer: LayerRef
+}
+
 /// A command the assistant can ask the app to run. Every case is a thin adapter over an
 /// existing `EditorSession` entry point — see CLAUDE.md part 2 for why no case may reimplement
 /// pixel logic, validation, or undo of its own.
@@ -196,6 +222,12 @@ enum EditCommand: Equatable, Sendable {
     case selectionExpand(SelectionAmount)
     case selectionContract(SelectionAmount)
     case selectionFeather(SelectionAmount)
+    case maskAdd(MaskAdd)
+    case maskAddFromSelection(MaskFromSelection)
+    case maskSetEnabled(MaskSetEnabled)
+    case maskDelete(MaskTarget)
+    case maskClipToBelow(MaskTarget)
+    case maskReleaseClipping(MaskTarget)
 
     /// Whether running this changes the document — and so must go through approval. The
     /// selection lives in the document (it is undoable), so selection commands count.
@@ -211,7 +243,7 @@ enum EditCommand: Equatable, Sendable {
     /// Needs a selection to work on (Select → Modify, Inverse).
     var needsSelection: Bool {
         switch self {
-        case .selectionInvert, .selectionExpand, .selectionContract, .selectionFeather: true
+        case .selectionInvert, .selectionExpand, .selectionContract, .selectionFeather, .maskAddFromSelection: true
         default: false
         }
     }
@@ -233,6 +265,10 @@ enum EditCommand: Equatable, Sendable {
         case .layerSetOpacity(let a): a.layer
         case .layerSetBlendMode(let a): a.layer
         case .layerDelete(let a): a.layer
+        case .maskAdd(let a): a.layer
+        case .maskAddFromSelection(let a): a.layer
+        case .maskSetEnabled(let a): a.layer
+        case .maskDelete(let a), .maskClipToBelow(let a), .maskReleaseClipping(let a): a.layer
         default: nil
         }
     }
@@ -283,6 +319,18 @@ extension EditCommand: Decodable {
             self = .selectionContract(try container.decode(SelectionAmount.self, forKey: .arguments))
         case "selection.feather":
             self = .selectionFeather(try container.decode(SelectionAmount.self, forKey: .arguments))
+        case "mask.add":
+            self = .maskAdd(try container.decode(MaskAdd.self, forKey: .arguments))
+        case "mask.addFromSelection":
+            self = .maskAddFromSelection(try container.decode(MaskFromSelection.self, forKey: .arguments))
+        case "mask.setEnabled":
+            self = .maskSetEnabled(try container.decode(MaskSetEnabled.self, forKey: .arguments))
+        case "mask.delete":
+            self = .maskDelete(try container.decode(MaskTarget.self, forKey: .arguments))
+        case "mask.clipToBelow":
+            self = .maskClipToBelow(try container.decode(MaskTarget.self, forKey: .arguments))
+        case "mask.releaseClipping":
+            self = .maskReleaseClipping(try container.decode(MaskTarget.self, forKey: .arguments))
         default:
             throw EditCommandError.unknownCommand(name)
         }

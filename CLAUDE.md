@@ -387,7 +387,7 @@ struct EditBatch: Codable { let label: String; let commands: [EditCommand]; var 
 | 단계 | 범위 | 상태 |
 |---|---|---|
 | 1 | `query.*` 전용(변경 없음) + 카탈로그 + 패널. digest와 프롬프트의 타당성을 먼저 증명한다. | **구현됨 — 2.13** |
-| 2 | `layer.*`, `selection.*`, `mask.*`, `adjustment.*` + 원자적 배치 + 승인 UI. | **2a·2b 구현됨**(`layer.*`, `selection.*` + 배치 + 승인 UI) — 2.14. `mask.*`/`adjustment.*`는 계획만 |
+| 2 | `layer.*`, `selection.*`, `mask.*`, `adjustment.*` + 원자적 배치 + 승인 UI. | **2a·2b·2c 구현됨**(`layer.*`, `selection.*`, `mask.*` + 배치 + 승인 UI) — 2.14. `adjustment.*`는 계획만 |
 | 3 | `filter.*`(비동기 모달 구동), `effects.*`, `transform.*`. | 계획만 |
 | 4 | `pixels.*`, 브러시, 내보내기. | 계획만 |
 
@@ -491,9 +491,56 @@ Stage 1(`query.*` + 카탈로그 + 패널)이 끝까지 구현되고 실기기�
 - **최종 측정**: 전체 선택 2/3·해제 2/3(실패는 무응답)·반전 3/3·왼/아래/위(타원) 절반 3/3–4/4·가운데 4/4·확장 3/3·페더 3/3·원 추가 4/4, **사각형 추가 2/4**(나머지는 타원으로 — 카드에 "타원 선택에 추가"로 보임). 레이어 회귀 3/3.
 - **테스트** `SelectionCommandTests`(6개): 캔버스 밖·크기 0 거부, 선택 필요 조건(앞선 제안 포함), 배치 = undo 1단계 + 복원, 추가 결합·중복 해제, 영역 → 좌표 계산, 도구가 빼기를 내지 않음.
 
+### Stage 2c — `mask.*` (2026-10-11)
+
+- **명령**: `mask.add`(reveal: 흰/검), `mask.addFromSelection`(shows: selection/outside — 같은 단계에서 선택 해제), `mask.setEnabled`, `mask.delete`, `mask.clipToBelow`, `mask.releaseClipping`. 레이어 패널의 세션 메서드(`addLayerMask`, `addMask`, `toggleLayerMask`, `deleteLayerMask`, `toggleClippingMask`, `removeLiveMask`)를 그대로 호출. 대화상자 없음.
+- **이 앱의 반대 기본값**: `addMask(revealing: true)`(레이어 패널 버튼의 기본)는 선택이 있으면 **선택 영역을 숨긴다**(Photoshop은 드러냄). 그래서 명령·도구·카드 모두 마스크 색이 아니라 **무엇이 보이는지**로 이름 붙인다(`shows: .selection` → `revealing: false`). `MaskCommandTests`가 마스크 픽셀로 이를 검증한다.
+- **검증**: 이미 마스크가 있으면 추가 거부, 없으면 켜기/끄기/삭제 거부, 클리핑은 `canToggleClippingMask`(폴더 아님, 같은 폴더 바로 아래에 폴더 아닌 레이어). 클리핑 해제 시 같은 기준으로 위에 클리핑된 레이어 수를 카드에 표시. 같은 레이어의 마스크 생성 두 건은 대체(`supersedingKey` "mask.create") — 모델이 두 번 넣은 적이 있고, 그대로면 두 번째가 실패해 배치 전체가 롤백된다.
+- **도구 `editMask`**(4번째 도구 — 권장 3–5개 안): `layer`는 **필수** 칸. 동작 이름에서 **"hide"를 뺐다** — `addHideAll`이 있을 때 "Photo 숨겨줘"가 레이어 숨기기 대신 숨김 마스크로 갔다(0/3 → 이름 변경 후 3/3). 동작별로 한 줄씩 의미를 적은 guide가 끄기/삭제 혼동(삭제 → 끄기 2/3)을 고쳤다.
+- **측정은 실제 경로로**: 레이어가 여럿이면 모델이 편집 전에 renderCanvas를 먼저 부르고, 첫 턴은 "이미지를 기다림"으로 끝난다. 실제 앱은 `AssistantSession`이 이미지를 붙여 재질문하므로 거기서 제안이 나온다. **`LanguageModelSession`을 직접 돌리는 측정은 이 경로를 빠뜨려 과소평가한다 — `AssistantSession.send` + `proposal`로 잴 것.**
+- **최종 측정**(`AssistantSession.send`, 레이어 3개 + 선택 있음): 마스크 추가 2/3·선택으로 보이게 3/3·끄기 3/3·삭제 3/3·클리핑 3/3, 레이어 숨기기·불투명도 3/3, 가운데 선택 3/3 — 23/27. **"전부 가리는 마스크"는 0/3**(일관되게 "전부 보임"을 고름, 카드에 "(전부 보임)"으로 보임).
+- **테스트** `MaskCommandTests`(7개).
+
 ### 2단계 남은 일
 
-- `mask.*`, `adjustment.*` 패밀리. (`selection.*`는 2b로 완료. Select Subject(`ObjectSelection`, 비동기 ML)는 아직.)
+- `adjustment.*` 패밀리. (`selection.*`는 2b, `mask.*`는 2c로 완료. Select Subject(`ObjectSelection`, 비동기 ML)는 아직.)
 - ~~승인 카드에서 이름을 바로 고칠 수 있게~~ → 완료(2026-10-11). 테스트: `correctingANameOnTheCardCarriesThroughTheProposal`, `aNameCorrectionThatWouldBeInvalidIsRefused`.
 - 도구 enum이 커질수록 정확도가 변할 수 있으니 패밀리를 추가할 때마다 위 측정을 다시 할 것.
 
+## 2.15 다음 세션에서 이어가기 (2026-10-12 기준)
+
+### 현재 상태
+
+- 브랜치 `ai-assistant`(포크 `origin` = `mechurisr/Compositor`; `upstream` = `robbietilton/Compositor`에는 push 금지).
+- 커밋 순서: `a7f8918` 캔버스 비전·한국어 → `d299450` 탭별 어시스턴트 → `9ef270c` 2a `layer.*` → `b83fbbd` 카드에서 이름 교정 → `d3ccd88` 2b `selection.*` → 2c `mask.*`(이 섹션과 함께 커밋).
+- `origin`에는 `9ef270c`까지 push됨. 그 뒤 커밋은 로컬에만 있다.
+- **2c(`mask.*`)는 테스트·실모델 측정은 끝났지만 앱에서 사람이 직접 확인하기 전**이다. 이어서 시작하면 먼저 확인할 것: 선택 → "선택 영역만 보이도록 Layer 1에 마스크 만들어줘" → 적용 후 선택 부분만 남는지 / 마스크 끄기·켜기·삭제 / 위 레이어를 아래에 클리핑.
+- 모델용 도구 4개: `inspectDocument`, `editLayer`, `editSelection`, `editMask`. Apple 권장 3–5개의 상한에 가깝다 — 5번째(조정 레이어)가 마지막 여유분.
+
+### 다음 단계: 2d `adjustment.*` — 미리 확인해 둔 것
+
+- `EditorSession.addAdjustment(_:)`(`Document/LayerAdjustment.swift:184`)는 레이어를 만든 뒤 편집 가능한 종류면 **`adjustmentEditingID = layer.id`로 편집기를 연다**. 편집기는 `UI/LayersPanel.swift:67`의 `.task(id: adjustmentEditingID)`가 **비동기로** 연다 → AI 경로에서는 `addAdjustment` 직후 같은 메인 액터 턴 안에서 `adjustmentEditingID`가 새 레이어 id면 `nil`로 되돌려 편집기가 열리지 않게 한다. 안 하면 적용 후 편집기가 열린 채 남고 `layerEditBlocker`가 이후 편집을 막는다.
+- `updateAdjustment(_:value:)`(`:206`)는 `beginEdit`/`endEdit`이 없다(라이브 프리뷰용) — 배치의 바깥 `beginEdit` 안에서만 부를 것. `value.isValid`가 아니면 조용히 무시하므로 적용 후 확인 필요.
+- 값 검증은 각 설정 구조체의 `isValid`/범위 상수를 재사용(1.2): `ExposureSettings.exposureRange` 등, `HueSaturationSettings`(범위별 hue/saturation/lightness).
+- 조정 레이어는 활성 레이어 바로 위(활성 폴더 안)에 생긴다. 모델에게는 종류 + 대표 값 1–2개만 주는 것을 권장(예: Exposure 스톱, Hue/Saturation의 saturation/lightness) — 필드가 많으면 엉뚱한 칸을 채운다(아래 교훈 2).
+
+### 온디바이스 모델과 일할 때의 교훈 (2.13–2.14 실측 요약)
+
+1. 도구 결과 속 이미지는 모델이 못 본다 → `CanvasImageMailbox`로 재질문.
+2. 옵셔널 칸이 많으면 엉뚱한 칸을 채운다(blendMode를 name 칸에, 선택 mode를 subtract로) → 값은 칸 하나(`value`)로 받거나, 의도를 **동작 이름**에 담는다.
+3. enum 이름·순서·설명 한 줄이 결과를 크게 바꾼다(`leftHalf`가 첫 항목이면 "위쪽"도 leftHalf, 마스크에 "hide"가 있으면 "숨겨줘"가 마스크로). 도구 간 단어 충돌을 피할 것.
+4. 계산(좌표, 중앙)은 모델에게 맡기지 말고 도구가 한다.
+5. 지시문에 언어 이름을 쓰지 않는다(한국어 질문에서 도구 호출이 멈춤). 번역은 별도 세션.
+6. 모델은 도구 에러·경고를 받아도 재시도하지 않는다 → 처음부터 맞게 부르게 하고, 나머지는 승인 카드가 잡는다.
+7. 조사 붙은 한국어 이름은 번역·변형된다 → 카드 경고 + 카드에서 이름 교정.
+
+### 측정 절차
+
+- `RunCodeSnippet`(소스 컨텍스트 `Compositor/Compositor/Assistant/AssistantSession.swift`)으로 요청 × 3–4회. **실행 중인 앱이 있으면 스니펫이 SwiftUI 창 레이아웃에서 크래시하므로 먼저 `StopProject`.** 크래시 스택이 `RootWindowLayoutComputer`면 하네스 문제 — 재실행.
+- 실제 경로로 잴 것: `AssistantSession(editorSession:)` → `await send(q)` → `proposal?.edits`. `LanguageModelSession`을 직접 돌리면 이미지 재질문 단계가 빠져 과소평가된다.
+- 판정은 엄격하게(모드·좌표 포함 정확 일치). 3회 표본은 변동이 크니 문구를 바꾼 뒤엔 반드시 다시 잰다.
+- 모델 없이 도는 테스트: `EditCommandEditTests`, `SelectionCommandTests`, `MaskCommandTests`, `EditCommandTests`, `EditCommandCatalogTests`. 실모델 테스트는 `AssistantSessionTests`(조건 불충족 시 조용히 통과 — 실행 시간으로 실제 실행 확인). 전체 스위트에서 `SliderSnapTests` 1개는 어시스턴트와 무관하게 실패한다(macOS 27의 SwiftUI `Slider`).
+
+### 작업 방식 (사용자와 합의)
+
+패밀리 하나씩: 구현 → 모델 없는 테스트 → 실모델 측정·조정 → 앱 실행 → **사용자가 앱에서 확인한 뒤 커밋**. push는 요청이 있을 때만.

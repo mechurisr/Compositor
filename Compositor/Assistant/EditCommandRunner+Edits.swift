@@ -45,6 +45,12 @@ extension EditCommand {
         case .selectionExpand: "selection.expand"
         case .selectionContract: "selection.contract"
         case .selectionFeather: "selection.feather"
+        case .maskAdd: "mask.add"
+        case .maskAddFromSelection: "mask.addFromSelection"
+        case .maskSetEnabled: "mask.setEnabled"
+        case .maskDelete: "mask.delete"
+        case .maskClipToBelow: "mask.clipToBelow"
+        case .maskReleaseClipping: "mask.releaseClipping"
         }
     }
 
@@ -57,6 +63,12 @@ extension EditCommand {
         case .layerSetOpacity(var a): a.layer = ref; return .layerSetOpacity(a)
         case .layerSetBlendMode(var a): a.layer = ref; return .layerSetBlendMode(a)
         case .layerDelete(var a): a.layer = ref; return .layerDelete(a)
+        case .maskAdd(var a): a.layer = ref; return .maskAdd(a)
+        case .maskAddFromSelection(var a): a.layer = ref; return .maskAddFromSelection(a)
+        case .maskSetEnabled(var a): a.layer = ref; return .maskSetEnabled(a)
+        case .maskDelete: return .maskDelete(MaskTarget(layer: ref))
+        case .maskClipToBelow: return .maskClipToBelow(MaskTarget(layer: ref))
+        case .maskReleaseClipping: return .maskReleaseClipping(MaskTarget(layer: ref))
         default: return self
         }
     }
@@ -89,6 +101,11 @@ extension EditCommand {
         case .layerSetVisibility(let a): "\(name)|\(a.layer)"
         case .layerSetOpacity(let a): "\(name)|\(a.layer)"
         case .layerSetBlendMode(let a): "\(name)|\(a.layer)"
+        case .maskSetEnabled(let a): "\(name)|\(a.layer)"
+        // Both kinds of mask creation share a key: a layer takes one mask, and a second add in
+        // the same proposal (the model once queued two) would fail and roll back the whole batch.
+        case .maskAdd(let a): "mask.create|\(a.layer)"
+        case .maskAddFromSelection(let a): "mask.create|\(a.layer)"
         default: nil
         }
     }
@@ -215,9 +232,61 @@ extension EditCommandRunner {
                                     hasSelection: (session.selection?.isEmpty == false) || selectionPending)
                 .map { ProposedEdit(command: command, summary: $0, isDestructive: false) }
 
+        case .maskAdd, .maskAddFromSelection, .maskSetEnabled, .maskDelete, .maskClipToBelow, .maskReleaseClipping:
+            return proposeMask(command, target: target, label: label,
+                               hasSelection: (session.selection?.isEmpty == false) || selectionPending)
+                .map { ProposedEdit(command: pinned, summary: $0.summary, isDestructive: $0.destructive) }
+
         case .queryDescribeDocument, .queryDescribeLayer, .queryRenderCanvas, .queryGetHistory, .queryGetCapabilities:
             return .failure(.invalidArguments(command: command.name, reason: "it does not change the document"))
         }
+    }
+
+    /// Mask commands' checks and card summary. `target` is nil for a layer an earlier edit in the
+    /// same proposal will create; it has no mask and no clipping yet, which is all a new layer can be.
+    private func proposeMask(_ command: EditCommand, target: ImageLayer?, label: String,
+                             hasSelection: Bool) -> Result<(summary: String, destructive: Bool), EditCommandError> {
+        let hasMask = target?.mask != nil
+        switch command {
+        case .maskAdd(let a):
+            if hasMask { return .failure(.notSupported("\(label) already has a mask; delete it first, or change it in the Layers panel.")) }
+            return .success((a.reveal ? "\(label)에 마스크 추가 (전부 보임)" : "\(label)에 마스크 추가 (전부 숨김)", false))
+        case .maskAddFromSelection(let a):
+            if hasMask { return .failure(.notSupported("\(label) already has a mask; delete it first.")) }
+            guard hasSelection else {
+                return .failure(.notSupported("mask.addFromSelection needs a selection; select something first."))
+            }
+            let what = a.shows == .selection ? "선택 영역만 보이게" : "선택 영역을 숨기게"
+            return .success(("\(label)에 마스크 추가 (\(what), 선택 해제됨)", false))
+        case .maskSetEnabled(let a):
+            guard hasMask else { return .failure(.notSupported("\(label) has no mask.")) }
+            return .success(("\(label) 마스크 \(a.enabled ? "켜기" : "끄기")", false))
+        case .maskDelete:
+            guard hasMask else { return .failure(.notSupported("\(label) has no mask.")) }
+            return .success(("\(label) 마스크 삭제", true))
+        case .maskClipToBelow:
+            guard let target else { return .failure(.notSupported("A new layer can be clipped once it exists; propose it after Apply.")) }
+            guard target.maskSourceID == nil else { return .failure(.notSupported("\(label) is already clipped.")) }
+            guard session.canToggleClippingMask(target.id), let below = layerBelow(target) else {
+                return .failure(.notSupported("\(label) can't be clipped: it needs a non-folder layer directly below it in the same folder."))
+            }
+            return .success(("\(label)을(를) 아래 '\(below.name)'에 클리핑", false))
+        case .maskReleaseClipping:
+            guard let target, let source = target.maskSourceID else { return .failure(.notSupported("\(label) is not clipped.")) }
+            // Releasing a layer releases the clipped layers above it that share its base.
+            let siblings = (session.document?.layers ?? []).filter { $0.parentID == target.parentID }
+            let above = siblings.drop { $0.id != target.id }.dropFirst().prefix { $0.maskSourceID == source }.count
+            return .success((above > 0 ? "\(label) 클리핑 해제 (위의 \(above)개도 함께)" : "\(label) 클리핑 해제", false))
+        default:
+            return .failure(.invalidArguments(command: command.name, reason: "not a mask command"))
+        }
+    }
+
+    /// The sibling just below `layer` in its folder — what a clipping mask attaches to.
+    private func layerBelow(_ layer: ImageLayer) -> ImageLayer? {
+        let siblings = (session.document?.layers ?? []).filter { $0.parentID == layer.parentID }
+        guard let index = siblings.firstIndex(where: { $0.id == layer.id }), index > 0 else { return nil }
+        return siblings[index - 1]
     }
 
     /// Selection commands' checks and card summary. A shape must overlap the canvas: clipped to it,
@@ -390,6 +459,10 @@ extension EditCommandRunner {
              .selectionExpand, .selectionContract, .selectionFeather:
             return applySelection(command)
 
+        case .maskAdd, .maskAddFromSelection, .maskSetEnabled, .maskDelete, .maskClipToBelow, .maskReleaseClipping:
+            guard let ref = command.layerRef else { return .failure(.notApplied(command.name)) }
+            return resolveLayer(ref).flatMap { applyMask(command, to: $0) }
+
         case .queryDescribeDocument, .queryDescribeLayer, .queryRenderCanvas, .queryGetHistory, .queryGetCapabilities:
             return .failure(.invalidArguments(command: command.name, reason: "it does not change the document"))
         }
@@ -420,6 +493,49 @@ extension EditCommandRunner {
             return .failure(.notApplied(command.name))
         }
         return .success(())
+    }
+
+    /// Through the Layers panel's own mask methods. Those act on the active layer, so the layer is
+    /// selected first, as it would be by the person; adding a mask also targets it for painting
+    /// (`isMaskSelected`), exactly as the panel does.
+    private func applyMask(_ command: EditCommand, to layer: ImageLayer) -> Result<Void, EditCommandError> {
+        switch command {
+        case .maskAdd(let a):
+            return select(layer.id, for: command).flatMap {
+                session.addLayerMask(revealing: a.reveal)
+                return check(layer.id, command) { $0.mask != nil }
+            }
+        case .maskAddFromSelection(let a):
+            guard session.selection?.isEmpty == false else { return .failure(.notSupported("There is no selection to make the mask from.")) }
+            return select(layer.id, for: command).flatMap {
+                // This app's `addMask(revealing: true)` hides the selection; false shows only it.
+                session.addMask(revealing: a.shows == .outside)
+                return check(layer.id, command) { $0.mask != nil }
+            }
+        case .maskSetEnabled(let a):
+            guard let mask = layer.mask else { return .failure(.notSupported("'\(layer.name)' has no mask.")) }
+            guard mask.isEnabled != a.enabled else { return .success(()) }
+            return select(layer.id, for: command).flatMap {
+                session.toggleLayerMask()
+                return check(layer.id, command) { $0.mask?.isEnabled == a.enabled }
+            }
+        case .maskDelete:
+            guard layer.mask != nil else { return .failure(.notSupported("'\(layer.name)' has no mask.")) }
+            return select(layer.id, for: command).flatMap {
+                session.deleteLayerMask()
+                return check(layer.id, command) { $0.mask == nil }
+            }
+        case .maskClipToBelow:
+            guard layer.maskSourceID == nil else { return .success(()) }
+            session.toggleClippingMask(layer.id)
+            return check(layer.id, command) { $0.maskSourceID != nil }
+        case .maskReleaseClipping:
+            guard layer.maskSourceID != nil else { return .success(()) }
+            session.removeLiveMask(from: layer.id)
+            return check(layer.id, command) { $0.maskSourceID == nil }
+        default:
+            return .failure(.invalidArguments(command: command.name, reason: "not a mask command"))
+        }
     }
 
     private static func mode(_ mode: SelectionShape.Mode) -> SelectionMode {
